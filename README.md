@@ -27,7 +27,7 @@ To convert this into a supervised instruction-tuning format suitable for LLaVA, 
 - **Extract**: Scans the highly imbalanced Kaggle dataset structure spanning 15 domains (textures and distinct objects).
 - **Transform**:
   - **Color Space Unification**: 3 domains (Grid, Screw, Zipper) are natively grayscale. These cause tensor-shape mismatch crashes in the RGB-only CLIP ViT. The pipeline forcefully converts all 1-channel images to 3-channel RGB (`cv2.cvtColor`).
-  - **Resolution Downsampling**: Native 1024×1024 images are aggressively resized to **336×336** to match LLaVA's maximum context window, cutting dataset size from 5GB to ~400MB.
+  - **Native Sliding Window Zooming**: To solve the industrial tiny-object issue natively, 1024×1024 raw images are dynamically shredded into overlapping **336×336** magnified inference grids. This natively aligns fine-tuning topology with inference evaluation, exponentially expanding the model's small-defect vision matrix logic without aspect-ratio destruction.
   - **Stratified Splitting**: Applies a strict 80/20 train/test split utilizing `StratifiedShuffleSplit`. This guarantees that the severe long-tail distribution of rare defects (e.g., *scratch*, *contamination*) is proportionally represented in both the training manifold and the evaluation set.
 - **Load**: Exports structured `train.jsonl` and `test.jsonl` files natively compatible with HuggingFace `datasets`.
 
@@ -60,8 +60,8 @@ To convert this into a supervised instruction-tuning format suitable for LLaVA, 
 | **Base Model** | `llava-hf/llava-1.5-7b-hf` | Baseline VLM pre-trained on generic concepts. |
 | **Quantization** | `4-bit (NF4)` | Double quantization enabled, `fp16` compute dtype. |
 | **LoRA Target Modules** | `q_proj`, `k_proj`, `v_proj`, `o_proj` | Targets all 4 self-attention projections for max capacity. |
-| **LoRA Rank ($r$)** | `32` | Increased from 16 to capture complex industrial defect features. |
-| **LoRA Alpha ($\alpha$)** | `64` | Maintains the standard $\alpha/r = 2.0$ scaling factor. |
+| **LoRA Rank ($r$)** | `64` | Native high-rank matrix to capture high-frequency complex industrial defect features natively without arithmetic smoothing. |
+| **LoRA Alpha ($\alpha$)** | `128` | Maintains the standard $\alpha/r = 2.0$ scaling factor. |
 | **Optimizer** | `paged_adamw_8bit` | Essential for preventing VRAM OOM spikes during backward passes. |
 | **Learning Rate** | `2e-5` | Cosine decay schedule with 3% warmup steps. |
 | **Hardware Constraint** | `1x NVIDIA Tesla T4` | Trained natively on Kaggle free-tier GPU. |
