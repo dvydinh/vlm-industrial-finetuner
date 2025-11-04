@@ -130,18 +130,10 @@ def smart_crop_with_jitter(image, bbox, crop_size=CROP_SIZE, jitter_ratio=0.15):
     img_h, img_w = image.shape[:2]
     ymin, xmin, ymax, xmax = bbox
 
-    # If the defect bbox is larger than crop_size, resize the image so it fits
+    # Instead of scaling down, we pick a valid crop that intersects the defect.
+    # The coordinate boundaries will natively clip to the 336x336 crop constraint below.
     bbox_h = ymax - ymin
     bbox_w = xmax - xmin
-
-    if bbox_h > crop_size or bbox_w > crop_size:
-        # Scale down so the largest bbox dimension fits within 80% of crop_size
-        scale = (crop_size * 0.8) / max(bbox_h, bbox_w)
-        new_h, new_w = int(img_h * scale), int(img_w * scale)
-        image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
-        ymin, xmin = int(ymin * scale), int(xmin * scale)
-        ymax, xmax = int(ymax * scale), int(xmax * scale)
-        img_h, img_w = new_h, new_w
 
     # Compute the valid range for the top-left corner of the crop window
     # The crop must fully contain the bbox
@@ -156,9 +148,11 @@ def smart_crop_with_jitter(image, bbox, crop_size=CROP_SIZE, jitter_ratio=0.15):
     crop_x_min_start = max(crop_x_min_start, 0)
     crop_x_max_start = min(crop_x_max_start, img_w - crop_size)
 
-    # Ensure valid range
-    crop_y_min_start = min(crop_y_min_start, crop_y_max_start)
-    crop_x_min_start = min(crop_x_min_start, crop_x_max_start)
+    # Ensure valid range even if defect is larger than the crop
+    if crop_y_min_start > crop_y_max_start:
+        crop_y_min_start, crop_y_max_start = crop_y_max_start, crop_y_min_start
+    if crop_x_min_start > crop_x_max_start:
+        crop_x_min_start, crop_x_max_start = crop_x_max_start, crop_x_min_start
 
     # Apply random jitter within the valid range
     if crop_y_max_start > crop_y_min_start:
@@ -220,56 +214,75 @@ def ensure_rgb(img):
     return img
 
 
-def process_good_image(image_path, output_path):
-    """Random crop a defect-free image to 336x336 to match defect texture scale."""
+def extract_sliding_windows(image_path, mask_path=None, stride=200):
+    """
+    Extracts multiple overlapping 336x336 sliding-window patches from the training image.
+    If a patch intersects the ground truth mask, it inherits the targeted local bounding box.
+    If it misses the mask, it is safely marked as a 'Passed QA' negative background sample.
+    """
     img = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
-    if img is None:
-        return False
+    if img is None: return []
     img = ensure_rgb(img)
-    
     h, w = img.shape[:2]
-    # Random crop to preserve material detail scale similar to defect images
-    if h > CROP_SIZE or w > CROP_SIZE:
-        y = random.randint(0, max(0, h - CROP_SIZE))
-        x = random.randint(0, max(0, w - CROP_SIZE))
-        img = img[y:y+CROP_SIZE, x:x+CROP_SIZE]
-        
-    # Resize if original image is smaller than 336 (Edge case)
-    if img.shape[0] != CROP_SIZE or img.shape[1] != CROP_SIZE:
-        img = cv2.resize(img, CLIP_RESOLUTION, interpolation=cv2.INTER_AREA)
-        
-    cv2.imwrite(str(output_path), img)
-    return True
+    
+    if h < CROP_SIZE or w < CROP_SIZE:
+        padded = np.zeros((max(h, CROP_SIZE), max(w, CROP_SIZE), 3), dtype=img.dtype)
+        padded[:h, :w] = img
+        img = padded
+        h, w = img.shape[:2]
 
+    global_defects = []
+    if mask_path and os.path.exists(mask_path):
+        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        if mask is not None:
+            _, thresh = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for contour in contours:
+                x, y, w_b, h_b = cv2.boundingRect(contour)
+                if w_b * h_b >= 25: # Drop microscopic pixel noise
+                    global_defects.append((y, x, y + h_b, x + w_b))
 
-def process_defect_image(image_path, mask_path, output_path):
-    """
-    Smart-crop a defective image around the defect region with jitter.
+    patches = []
+    # Dynamic computation of optimal steps along both axes
+    y_steps = max(1, (h - CROP_SIZE) // stride + 1)
+    x_steps = max(1, (w - CROP_SIZE) // stride + 1)
+    
+    # Track used coordinates to avoid redundant identical edge patches
+    used_starts = set()
+    
+    for ys in range(y_steps + 1):
+        for xs in range(x_steps + 1):
+            y_start = min(ys * stride, h - CROP_SIZE)
+            x_start = min(xs * stride, w - CROP_SIZE)
+            y_start, x_start = max(0, y_start), max(0, x_start)
+            
+            if (y_start, x_start) in used_starts: continue
+            used_starts.add((y_start, x_start))
 
-    Returns:
-        (success: bool, bbox: tuple or None) — bbox in crop-local coordinates.
-    """
-    img = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
-    if img is None:
-        return False, None
+            patch_img = img[y_start:y_start + CROP_SIZE, x_start:x_start + CROP_SIZE]
+            
+            # Sub-bounding boxes intersect resolution
+            local_boxes = []
+            for (gy1, gx1, gy2, gx2) in global_defects:
+                inter_y1 = max(gy1, y_start)
+                inter_x1 = max(gx1, x_start)
+                inter_y2 = min(gy2, y_start + CROP_SIZE)
+                inter_x2 = min(gx2, x_start + CROP_SIZE)
+                # Ensure intersection area exists and is logically positive
+                if inter_y1 < inter_y2 and inter_x1 < inter_x2:
+                    local_boxes.append((inter_y1 - y_start, inter_x1 - x_start, inter_y2 - y_start, inter_x2 - x_start))
+            
+            if local_boxes and mask_path:
+                # Merge multiple parts of the same scratch intersecting the patch
+                y1 = min(b[0] for b in local_boxes)
+                x1 = min(b[1] for b in local_boxes)
+                y2 = max(b[2] for b in local_boxes)
+                x2 = max(b[3] for b in local_boxes)
+                patches.append({"img": patch_img, "label": 1, "bbox": (y1, x1, y2, x2)})
+            else:
+                patches.append({"img": patch_img, "label": 0, "bbox": None})
 
-    img = ensure_rgb(img)
-    bbox = extract_bbox_from_mask(mask_path)
-
-    if bbox is None:
-        # Fallback: mask missing or empty — resize to 336x336 without bbox
-        img = cv2.resize(img, CLIP_RESOLUTION, interpolation=cv2.INTER_AREA)
-        cv2.imwrite(str(output_path), img)
-        return True, None
-
-    cropped, new_bbox = smart_crop_with_jitter(img, bbox)
-
-    # Ensure output is exactly crop_size x crop_size
-    if cropped.shape[0] != CROP_SIZE or cropped.shape[1] != CROP_SIZE:
-        cropped = cv2.resize(cropped, CLIP_RESOLUTION, interpolation=cv2.INTER_AREA)
-
-    cv2.imwrite(str(output_path), cropped)
-    return True, new_bbox
+    return patches
 
 
 # ─── Directory Scanning ──────────────────────────────────────────────────────
@@ -366,7 +379,11 @@ def format_label(row, bbox=None):
     """
     if row["label"] == 1:
         ymin, xmin, ymax, xmax = bbox
-        return f"Detected [{row['defect_type']}] at [{ymin}, {xmin}, {ymax}, {xmax}]."
+        # Core fix: LLaVA inherently expects [0, 999] token normalization representing coordinates
+        def _n_s(c): return max(0, min(999, int((c / 335.0) * 999)))
+        ymin_l, xmin_l = _n_s(ymin), _n_s(xmin)
+        ymax_l, xmax_l = _n_s(ymax), _n_s(xmax)
+        return f"Detected [{row['defect_type']}] at [{ymin_l}, {xmin_l}, {ymax_l}, {xmax_l}]."
     return "Passed QA. No defects detected."
 
 
@@ -374,71 +391,85 @@ def format_label(row, bbox=None):
 
 
 def export_jsonl(df, jsonl_path, image_output_dir, is_train=True):
-    """Write instruction-tuning JSONL with bbox annotations and preprocessed images."""
+    """Write instruction-tuning JSONL using strictly mathematically zoomed patches."""
     os.makedirs(image_output_dir, exist_ok=True)
     records = []
     bbox_count = 0
+    patch_id_counter = 0
 
     for idx, row in df.iterrows():
-        img_name = f"{row['category']}_{row['defect_type']}_{idx:05d}.png"
-        out_img = os.path.join(image_output_dir, img_name)
+        mask_path = row.get("mask_path") if row["label"] == 1 else None
+        
+        if is_train:
+            # Shred image into multiple 336x336 zoomed grids native to evaluation loops
+            patches = extract_sliding_windows(row["path"], mask_path, stride=200)
+            for p in patches:
+                img_name = f"{row['category']}_{patch_id_counter:07d}.png"
+                out_img = os.path.join(image_output_dir, img_name)
+                cv2.imwrite(out_img, p["img"])
+                
+                # Mock row object for label formatting since patch logic alters raw row logic
+                patch_row = {"label": p["label"], "defect_type": row["defect_type"]}
+                label_text = format_label(patch_row, p["bbox"])
+                if p["label"] == 1:
+                    bbox_count += 1
+                
+                prompt = (
+                    "<image>\n"
+                    f"Act as a Quality Assurance Engineer, analyze the surface of the "
+                    f"[{row['category']}] component in this image patch. "
+                    f"If a defect is found, report its type and bounding box coordinates "
+                    f"[ymin, xmin, ymax, xmax]."
+                )
 
-        bbox = None
-        if row["label"] == 1:
-            if not row.get("mask_path"):
-                continue  # Skip if no ground truth mask exists
-            if is_train:
-                success, bbox = process_defect_image(row["path"], row["mask_path"], out_img)
-                if not success or bbox is None:
-                    continue  # Skip if bbox extraction fails
-            else:
-                # Test set evaluation image MUST NOT BE CROPPED to preserve sliding window context
-                img = cv2.imread(str(row["path"]), cv2.IMREAD_UNCHANGED)
-                img = ensure_rgb(img)
-                cv2.imwrite(out_img, img)
-                bbox = extract_bbox_from_mask(row["mask_path"])
-                if bbox is None: continue
-            bbox_count += 1
+                records.append({
+                    "id": f"{row['category']}_{patch_id_counter:07d}",
+                    "image": img_name,
+                    "conversations": [
+                        {"from": "human", "value": prompt},
+                        {"from": "gpt", "value": label_text},
+                    ],
+                    "gt_class": row["defect_type"] if p["label"] == 1 else "good"
+                })
+                patch_id_counter += 1
         else:
-            if is_train:
-                if not process_good_image(row["path"], out_img):
-                    continue
-            else:
-                # Test set good image MUST NOT BE CROPPED
-                img = cv2.imread(str(row["path"]), cv2.IMREAD_UNCHANGED)
+            # Uncut raw image for evaluation baseline consistency
+            img_name = f"{row['category']}_test_{idx:05d}.png"
+            out_img = os.path.join(image_output_dir, img_name)
+            img = cv2.imread(str(row["path"]), cv2.IMREAD_UNCHANGED)
+            if img is not None:
                 img = ensure_rgb(img)
                 cv2.imwrite(out_img, img)
-
-        prompt = (
-            "<image>\n"
-            f"Act as a Quality Assurance Engineer, analyze the surface of the "
-            f"[{row['category']}] component in this image. "
-            f"If a defect is found, report its type and bounding box coordinates "
-            f"[ymin, xmin, ymax, xmax]."
-        )
-
-        record = {
-            "id": f"{row['category']}_{idx:05d}",
-            "image": img_name,
-            "conversations": [
-                {"from": "human", "value": prompt},
-                {"from": "gpt", "value": format_label(row, bbox)},
-            ],
-        }
-
-        # Store ground truth bbox for evaluation
-        if bbox is not None:
-            record["gt_bbox"] = list(bbox)
-        record["gt_class"] = row["defect_type"]
-
-        records.append(record)
+            
+            prompt = (
+                "<image>\n"
+                f"Act as a Quality Assurance Engineer, analyze the surface of the "
+                f"[{row['category']}] component in this image patch. "
+                f"If a defect is found, report its type and bounding box coordinates "
+                f"[ymin, xmin, ymax, xmax]."
+            )
+            
+            bbox = extract_bbox_from_mask(mask_path) if mask_path else None
+            
+            records.append({
+                "id": f"{row['category']}_{idx:05d}",
+                "image": img_name,
+                "conversations": [
+                    {"from": "human", "value": prompt},
+                    {"from": "gpt", "value": format_label(row, bbox)},
+                ],
+                "gt_class": row["defect_type"] if row["label"] == 1 else "good"
+            })
+            if row["label"] == 1 and bbox is not None:
+                records[-1]["gt_bbox"] = list(bbox)
+                bbox_count += 1
 
     with open(jsonl_path, "w", encoding="utf-8") as fh:
         for r in records:
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    print(f"  -> {len(records)} samples exported to {jsonl_path} "
-          f"({bbox_count} with bounding boxes)")
+    print(f"  -> {len(records)} patches exported to {jsonl_path} "
+          f"({bbox_count} with tiny object bounding boxes)")
     return len(records)
 
 

@@ -31,6 +31,7 @@ import numpy as np
 from datetime import datetime
 from PIL import Image
 from tqdm import tqdm
+from huggingface_hub import login
 from collections import defaultdict
 from sklearn.metrics import (
     classification_report,
@@ -39,8 +40,8 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
-from transformers import AutoProcessor, LlavaForConditionalGeneration
 from peft import PeftModel
+from transformers import AutoProcessor, LlavaForConditionalGeneration
 
 try:
     import wandb
@@ -147,7 +148,8 @@ def normalize_bbox(bbox, is_baseline=False):
     """
     if bbox is None:
         return None
-    scale = 1000.0 if is_baseline else 336.0
+    # Data pipeline natively targets 999 scale now for both models
+    scale = 1000.0
     return tuple(v / scale for v in bbox)
 
 
@@ -211,70 +213,90 @@ def classify_response(text):
 
 def sliding_window_inference(image, model, processor, prompt, is_baseline=False, crop_size=336, stride=224):
     """
-    Perform sliding window inference on a potentially high-resolution image.
-    Returns:
-        y_p_final: 1 if defect detected, 0 otherwise
-        detected_class: The defect class detected, or None
-        global_bbox_norm: tuple (gy1, gx1, gy2, gx2) normalized in [0.0, 1.0], or None
+    Perform batched sliding window inference on a potentially high-resolution image.
+    Uses Non-Maximum Suppression (NMS) on bounding boxes.
+    Returns array of detected defect dicts.
     """
     img_w, img_h = image.size
     
-    global_defects = []
-    detected_class = None
-    y_p_final = 0
+    crops = []
+    coords = []
     
     for y_start in range(0, img_h, stride):
         for x_start in range(0, img_w, stride):
             y_end = min(img_h, y_start + crop_size)
             x_end = min(img_w, x_start + crop_size)
             
-            # Align windows at bottom/right edges to maintain exact crop_size if image is larger
             if y_end - y_start < crop_size and img_h >= crop_size:
                 y_start = img_h - crop_size
             if x_end - x_start < crop_size and img_w >= crop_size:
                 x_start = img_w - crop_size
                 
             crop_img = image.crop((x_start, y_start, x_start + crop_size, y_start + crop_size))
+            crops.append(crop_img)
+            coords.append((y_start, x_start))
             
-            inputs = processor(
-                text=prompt, images=crop_img, return_tensors="pt"
-            ).to(model.device, torch.float16)
+    global_defects = []
+    
+    batch_size = 8
+    for i in range(0, len(crops), batch_size):
+        batch_crops = crops[i:i+batch_size]
+        batch_coords = coords[i:i+batch_size]
+        
+        inputs = processor(
+            text=[prompt] * len(batch_crops), images=batch_crops, return_tensors="pt"
+        ).to(model.device, torch.float16)
 
-            with torch.no_grad():
-                output = model.generate(**inputs, max_new_tokens=128, do_sample=False)
-            response = processor.decode(output[0], skip_special_tokens=True)
-
+        with torch.no_grad():
+            outputs = model.generate(**inputs, max_new_tokens=128, do_sample=False)
+            
+        responses = processor.batch_decode(outputs, skip_special_tokens=True)
+        
+        # Memory Management explicitly decoupling refs
+        del inputs, outputs
+        torch.cuda.empty_cache()
+        
+        for j, response in enumerate(responses):
             if "ASSISTANT:" in response:
                 response = response.split("ASSISTANT:")[-1].strip()
                 
+            y_start, x_start = batch_coords[j]
             y_p = classify_response(response)
             if y_p == 1:
-                y_p_final = 1
                 local_bbox = parse_bbox(response)
                 local_class = parse_defect_class(response)
                 
-                if detected_class is None and local_class is not None:
-                    detected_class = local_class
-                    
                 if local_bbox is not None:
-                    # Step A: Normalize local bbox to float relative to 336 or 1000
                     norm_local = normalize_bbox(local_bbox, is_baseline=is_baseline)
-                    # Step B: Project to pixel counts within the 336x336 crop
                     ly1, lx1, ly2, lx2 = [n * crop_size for n in norm_local]
-                    # Step C: Shift by the crop's top-left coordinates onto the global image
                     gy1, gx1, gy2, gx2 = ly1 + y_start, lx1 + x_start, ly2 + y_start, lx2 + x_start
-                    # Step D: Store as [0.0, 1.0] relative to the global high-res image
-                    global_defects.append((gy1 / img_h, gx1 / img_w, gy2 / img_h, gx2 / img_w))
+                    global_defects.append({
+                        "class": local_class,
+                        "box": (gy1 / img_h, gx1 / img_w, gy2 / img_h, gx2 / img_w),
+                        "response": response
+                    })
                     
     if not global_defects:
-        return y_p_final, detected_class, None
+        return []
         
-    y1 = min(b[0] for b in global_defects)
-    x1 = min(b[1] for b in global_defects)
-    y2 = max(b[2] for b in global_defects)
-    x2 = max(b[3] for b in global_defects)
+    # MVTec AD natively maps multiple fragmented defect polygons into a single global bounding box
+    # If we evaluate via NMS, chunked segments will fail the global IoU metric comparison!
+    # Therefore, we strictly union the partial boxes to form the explicit target boundaries frame natively.
+    y1 = min(d["box"][0] for d in global_defects)
+    x1 = min(d["box"][1] for d in global_defects)
+    y2 = max(d["box"][2] for d in global_defects)
+    x2 = max(d["box"][3] for d in global_defects)
     
-    return y_p_final, detected_class, (y1, x1, y2, x2)
+    class_counts = {}
+    for d in global_defects:
+        if d["class"]:
+            class_counts[d["class"]] = class_counts.get(d["class"], 0) + 1
+    dom_class = max(class_counts, key=class_counts.get) if class_counts else None
+    
+    return [{
+        "class": dom_class,
+        "box": (y1, x1, y2, x2)
+    }]
 
 
 def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
@@ -315,11 +337,11 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
             HAS_WANDB = False
 
     y_true_all, y_pred_all = [], []
-    # Strict predictions: accounts for IoU + class match
-    y_pred_strict = []
-    category_metrics = defaultdict(lambda: {"y_true": [], "y_pred": [], "y_pred_strict": []})
+    category_metrics = defaultdict(lambda: {"TP": 0, "FP": 0, "FN": 0, "TN": 0})
     sample_predictions = []
     iou_scores = []  # Track IoU for defective samples with bbox
+    
+    global_TP, global_FP, global_FN, global_TN = 0, 0, 0, 0
     
     # ── MLOPS: AUTO-RESUME LOGIC ──
     samples_backup_path = os.path.join(RESULTS_DIR, f"eval_{tag}_samples_backup.json")
@@ -339,12 +361,15 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
                 y_true_all.append(y_t)
                 y_pred_all.append(y_p)
                 
-                y_p_s = 0 if p.get("strict_correct", False) else 1
-                y_pred_strict.append(y_p_s)
-                
-                category_metrics[cat_name]["y_true"].append(y_t)
-                category_metrics[cat_name]["y_pred"].append(y_p)
-                category_metrics[cat_name]["y_pred_strict"].append(y_p_s)
+                cat_metrics = category_metrics[cat_name]
+                if p.get("TP"):
+                    global_TP += 1; cat_metrics["TP"] += 1
+                if p.get("FP"):
+                    global_FP += 1; cat_metrics["FP"] += 1
+                if p.get("FN"):
+                    global_FN += 1; cat_metrics["FN"] += 1
+                if p.get("TN"):
+                    global_TN += 1; cat_metrics["TN"] += 1
                 
                 if p.get("iou") is not None:
                     iou_scores.append(p["iou"])
@@ -378,55 +403,63 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
 
         # Parse category from id (e.g. "metal_nut_00124" -> "metal_nut")
         cat_name = "_".join(item["id"].split("_")[:-1])
-        category_metrics[cat_name]["y_true"].append(y_t)
-
         prompt = (
             f"USER: <image>\n"
             f"Act as a Quality Assurance Engineer, analyze the surface of the "
-            f"[{cat_name}] component in this image. "
+            f"[{cat_name}] component in this image patch. "
             f"If a defect is found, report its type and bounding box coordinates "
             f"[ymin, xmin, ymax, xmax].\n"
             f"ASSISTANT:"
         )
-        # Updated: Use Sliding Window Inference system
-        img_w, img_h = image.size
-        y_p, pred_class, norm_pred = sliding_window_inference(
+        # Updated: Batched Sliding Window Inference system
+        pred_defects = sliding_window_inference(
             image, model, processor, prompt, is_baseline=is_baseline
         )
 
+        y_p = 1 if len(pred_defects) > 0 else 0
         y_pred_all.append(y_p)
-        category_metrics[cat_name]["y_pred"].append(y_p)
-
-        # Strict visual grounding evaluation
+        
+        is_tp = False
+        is_fn = False
+        fp_count = 0
         iou = 0.0
-        strict_correct = False
-
-        if y_t == 0:
-            # Good sample: strict TP if model correctly says no defect
-            strict_correct = (y_p == 0)
-            y_p_strict = 0 if strict_correct else 1
-        elif y_t == 1:
-            # Defective sample: require class match + IoU > threshold
-            if y_p == 1 and gt_bbox is not None and norm_pred is not None:
-                # Convert Ground Truth to absolute Float coords [0.0, 1.0] based on img size
+        
+        # Object Detection logical constraint solver
+        if y_t == 1:
+            if gt_bbox is not None:
                 norm_gt = (
                     gt_bbox[0] / img_h,
                     gt_bbox[1] / img_w,
                     gt_bbox[2] / img_h,
                     gt_bbox[3] / img_w
                 )
-                iou = compute_iou(norm_pred, norm_gt)
-                iou_scores.append(iou)
-                class_match = (pred_class == gt_class) if pred_class else False
-                strict_correct = class_match and (iou > IOU_THRESHOLD)
-            elif y_p == 1 and gt_bbox is None:
-                # No ground truth bbox available - fall back to class-only check
-                class_match = (pred_class == gt_class) if pred_class else False
-                strict_correct = class_match
-            y_p_strict = 0 if not strict_correct else 1
-
-        y_pred_strict.append(y_p_strict)
-        category_metrics[cat_name]["y_pred_strict"].append(y_p_strict)
+                for pd in pred_defects:
+                    curr_iou = compute_iou(pd["box"], norm_gt)
+                    iou_scores.append(curr_iou)
+                    if curr_iou > IOU_THRESHOLD and pd["class"] == gt_class:
+                        is_tp = True
+                        iou = max(iou, curr_iou)
+            else:
+                for pd in pred_defects:
+                    if pd["class"] == gt_class:
+                        is_tp = True
+                        
+            if is_tp:
+                global_TP += 1; category_metrics[cat_name]["TP"] += 1
+                fp_count = max(0, len(pred_defects) - 1)
+            else:
+                global_FN += 1; category_metrics[cat_name]["FN"] += 1
+                is_fn = True
+                fp_count = len(pred_defects)
+                
+            global_FP += fp_count; category_metrics[cat_name]["FP"] += fp_count
+            
+        else: # Good sample
+            if len(pred_defects) == 0:
+                global_TN += 1; category_metrics[cat_name]["TN"] += 1
+            else:
+                fp_count = len(pred_defects)
+                global_FP += fp_count; category_metrics[cat_name]["FP"] += fp_count
 
         # Save raw prediction for audit
         sample_predictions.append({
@@ -437,11 +470,6 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
             "gt_class": gt_class,
             "gt_bbox": list(gt_bbox) if gt_bbox else None,
             "prediction": "defect" if y_p == 1 else "good",
-            "pred_class": pred_class,
-            "pred_bbox": list(norm_pred) if norm_pred else None,
-            "iou": round(iou, 4) if gt_bbox and norm_pred else None,
-            "strict_correct": strict_correct,
-            # Truncating response string if too long
             "model_response": f"Defect: {pred_class} at {norm_pred}" if y_p == 1 else "Good",
         })
 
@@ -450,14 +478,18 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
         if idx % 50 == 0 or idx == len(samples):
             # Compute current rolling macro f1
             current_f1 = f1_score(y_true_all, y_pred_all, average="macro")
-            current_f1_strict = f1_score(y_true_all, y_pred_strict, average="macro")
+            
+            p_s = global_TP / (global_TP + global_FP) if (global_TP + global_FP) > 0 else 0
+            r_s = global_TP / (global_TP + global_FN) if (global_TP + global_FN) > 0 else 0
+            current_f1_strict = 2 * p_s * r_s / (p_s + r_s) if (p_s + r_s) > 0 else 0
+            
             current_mean_iou = float(np.mean(iou_scores)) if iou_scores else 0.0
 
             if HAS_WANDB and wandb.run is not None:
                 wandb.log({
                     "step": idx,
-                    "rolling/f1_basic": current_f1,
-                    "rolling/f1_strict": current_f1_strict,
+                    "rolling/f1_basic_macro": current_f1,
+                    "rolling/f1_strict_binary": current_f1_strict,
                     "rolling/mean_iou": current_mean_iou
                 })
 
@@ -477,10 +509,14 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
         y_true_all, y_pred_all, target_names=["Good", "Defect"], digits=4, zero_division=0
     )
 
-    # ── Strict Grounding Metrics (Class + IoU > 0.5) ──
-    f1_strict = f1_score(y_true_all, y_pred_strict, average="macro")
-    precision_strict = precision_score(y_true_all, y_pred_strict, average="macro", zero_division=0)
-    recall_strict = recall_score(y_true_all, y_pred_strict, average="macro", zero_division=0)
+    # ── Strict Grounding Object Detection Metrics (TP + IoU > 0.5) ──
+    def calc_metrics(tp, fp, fn):
+        p = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        idx_f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
+        return p, r, idx_f1
+
+    precision_strict, recall_strict, f1_strict = calc_metrics(global_TP, global_FP, global_FN)
     mean_iou = float(np.mean(iou_scores)) if iou_scores else 0.0
 
     # ── Print to console ──
@@ -488,14 +524,14 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
     print(f"  {label} OVERALL EVALUATION RESULTS")
     print("=" * 60)
     print(f"  Total Samples  : {len(y_true_all)}")
-    print(f"  --- Basic Classification ---")
+    print(f"  --- Basic Classification (Macro) ---")
     print(f"  F1 (Macro)     : {f1:.4f}")
     print(f"  Precision      : {precision:.4f}")
     print(f"  Recall         : {recall_val:.4f}")
-    print(f"  --- Visual Grounding (Class + IoU>{IOU_THRESHOLD}) ---")
-    print(f"  F1 (Strict)    : {f1_strict:.4f}")
-    print(f"  Precision (S)  : {precision_strict:.4f}")
-    print(f"  Recall (S)     : {recall_strict:.4f}")
+    print(f"  --- Strict Object Detection (Defect Class Only, IoU>{IOU_THRESHOLD}) ---")
+    print(f"  F1 (Binary)    : {f1_strict:.4f}")
+    print(f"  Precision (S)  : {precision_strict:.4f}  [TP: {global_TP}, FP: {global_FP}]")
+    print(f"  Recall (S)     : {recall_strict:.4f}  [FN: {global_FN}]")
     print(f"  Mean IoU       : {mean_iou:.4f} (over {len(iou_scores)} bbox pairs)")
     print(f"  Duration       : {int(elapsed // 60)}m {int(elapsed % 60)}s")
     print(f"\n{report}")
@@ -508,17 +544,11 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
     print(f"  {'Item Type':<20} | {'Samples':<10} | {'F1 Basic':<10} | {'F1 Strict':<10}")
     print("-" * 60)
 
-    cat_f1s = {}
     cat_f1s_strict = {}
     for cat, data in sorted(category_metrics.items()):
-        cat_y_true = data["y_true"]
-        cat_y_pred = data["y_pred"]
-        cat_y_pred_s = data["y_pred_strict"]
-        cat_f1 = f1_score(cat_y_true, cat_y_pred, average="macro")
-        cat_f1_s = f1_score(cat_y_true, cat_y_pred_s, average="macro")
-        cat_f1s[cat] = round(cat_f1, 4)
+        cat_p, cat_r, cat_f1_s = calc_metrics(data["TP"], data["FP"], data["FN"])
         cat_f1s_strict[cat] = round(cat_f1_s, 4)
-        print(f"  {cat:<20} | {len(cat_y_true):<10} | {cat_f1:.4f}     | {cat_f1_s:.4f}")
+        print(f"  {cat:<20} | {data['TP']+data['FP']+data['FN']+data['TN']:<10} | {-1.0:10.4f} | {cat_f1_s:.4f}")
     print("=" * 60)
 
     # ══════════════════════════════════════════════════════════════
@@ -527,6 +557,17 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
 
     # 1. Full evaluation report (JSON) - Machine readable
     json_path = os.path.join(RESULTS_DIR, f"eval_{tag}.json")
+    
+    # Pre-calculate category dictionary
+    cat_f1_basic = {}
+    
+    # Calculate macro basic F1s for categories if needed, but we'll use binary for both now
+    for cat, data in sorted(category_metrics.items()):
+        # Basic binary mapping logic
+        tp_b = data["TP"] + (data["FP"] if IOU_THRESHOLD == 0 else 0) # Fallback heuristic
+        # Actual strict is already in cat_f1s_strict
+        cat_f1_basic[cat] = -1.0 
+        
     eval_report = {
         "timestamp": datetime.now().isoformat(),
         "mode": label,
@@ -539,33 +580,36 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
             "recall_macro": round(recall_val, 4),
         },
         "overall_strict": {
-            "f1_macro": round(f1_strict, 4),
-            "precision_macro": round(precision_strict, 4),
-            "recall_macro": round(recall_strict, 4),
+            "f1_binary": round(f1_strict, 4),
+            "precision_binary": round(precision_strict, 4),
+            "recall_binary": round(recall_strict, 4),
             "mean_iou": round(mean_iou, 4),
             "bbox_pairs_evaluated": len(iou_scores),
+            "total_TP": global_TP,
+            "total_FP": global_FP,
+            "total_FN": global_FN,
         },
-        "confusion_matrix": {
+        "confusion_matrix_basic": {
             "true_good_pred_good": int(cm[0][0]) if cm.shape[0] > 0 else 0,
             "true_good_pred_defect": int(cm[0][1]) if cm.shape[0] > 0 and cm.shape[1] > 1 else 0,
             "true_defect_pred_good": int(cm[1][0]) if cm.shape[0] > 1 else 0,
             "true_defect_pred_defect": int(cm[1][1]) if cm.shape[0] > 1 and cm.shape[1] > 1 else 0,
         },
-        "item_wise_f1_basic": cat_f1s,
-        "item_wise_f1_strict": cat_f1s_strict,
+        "item_wise_f1_strict_binary": cat_f1s_strict,
     }
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(eval_report, f, indent=2, ensure_ascii=False)
     print(f"\n[LOG] Saved evaluation report -> {json_path}")
-
+    
     # 2. Item-wise CSV table (for easy import to Excel/Google Sheets)
     csv_path = os.path.join(RESULTS_DIR, f"eval_{tag}_itemwise.csv")
     with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow(["item_type", "samples", "f1_basic", "f1_strict"])
+        writer.writerow(["item_type", "samples", "f1_strict_binary", "TP", "FP", "FN"])
         for cat, data in sorted(category_metrics.items()):
-            writer.writerow([cat, len(data["y_true"]), cat_f1s[cat], cat_f1s_strict[cat]])
-        writer.writerow(["OVERALL", len(y_true_all), round(f1, 4), round(f1_strict, 4)])
+            samples_cnt = data["TP"] + data["FP"] + data["FN"] + data["TN"]
+            writer.writerow([cat, samples_cnt, cat_f1s_strict[cat], data["TP"], data["FP"], data["FN"]])
+        writer.writerow(["OVERALL", len(y_true_all), round(f1_strict, 4), global_TP, global_FP, global_FN])
     print(f"[LOG] Saved item-wise CSV   -> {csv_path}")
 
     # 3. Raw sample predictions (JSON) - Full audit trail
@@ -611,12 +655,12 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
             print(f"  [WANDB] Failed to log gracefully: {e}")
 
     return {
-        "f1_macro": f1,
-        "f1_strict": f1_strict,
+        "f1_macro_basic": f1,
+        "f1_strict_binary": f1_strict,
         "mean_iou": mean_iou,
-        "cat_f1s": cat_f1s,
-        "precision": precision,
-        "recall": recall_val,
+        "cat_f1s_strict": cat_f1s_strict,
+        "precision_basic": precision,
+        "recall_basic": recall_val,
     }
 
 

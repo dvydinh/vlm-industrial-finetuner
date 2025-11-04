@@ -93,24 +93,30 @@ class MVTecInstructDataset(Dataset):
         )
         item_dict = {k: v.squeeze(0) for k, v in encoding.items()}
         
-        # Encode the exact prompt independently to find its exact token length
-        prompt_text = f"USER: {user_msg}\n{assistant_prefix}"
-        prompt_encoding = self.processor(
-            text=prompt_text,
-            images=image,
-            return_tensors="pt",
-            padding=False,
-            truncation=True,
-            max_length=self.max_length
-        )
-        prompt_len = prompt_encoding["input_ids"].shape[1]
+        # Encode the exact target footprint we expect before the answer
+        target_seq = self.processor.tokenizer.encode("ASSISTANT:", add_special_tokens=False)
+        target_tensor = torch.tensor(target_seq, dtype=item_dict["input_ids"].dtype, device=item_dict["input_ids"].device)
         
         # Causal LM requires `labels`
         labels = item_dict["input_ids"].clone()
         
-        # Mask EVERYTHING up to the exact length of the prompt
-        # This guarantees 100% precision regardless of tokenizer merging quirks
-        labels[:prompt_len] = -100
+        # Find exact boundary
+        mask_idx = -1
+        seq_len = len(target_seq)
+        for i in range(len(labels) - seq_len):
+            if torch.equal(labels[i:i+seq_len], target_tensor):
+                mask_idx = i + seq_len
+                break
+                
+        if mask_idx != -1:
+            labels[:mask_idx] = -100
+            prompt_len = mask_idx # for debug purposes
+        else:
+            # Fallback if tokenizer merges ASSISTANT: heavily with prefixes
+            prompt_text = f"USER: {user_msg}\nASSISTANT:"
+            prompt_encoding = self.processor(text=prompt_text, images=image, return_tensors="pt", padding=False, truncation=True, max_length=self.max_length)
+            prompt_len = prompt_encoding["input_ids"].shape[1]
+            labels[:prompt_len] = -100
 
         # Debug print for tokenizer boundary (-100 mask validation)
         if hasattr(self, "first_sample_printed") and not self.first_sample_printed:
@@ -346,8 +352,8 @@ if __name__ == "__main__":
     parser.add_argument("--grad_accum", type=int, default=4)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--lora_r", type=int, default=32)
-    parser.add_argument("--lora_alpha", type=int, default=64)
+    parser.add_argument("--lora_r", type=int, default=64)
+    parser.add_argument("--lora_alpha", type=int, default=128)
     parser.add_argument("--max_seq_length", type=int, default=1024)
     parser.add_argument("--save_steps", type=int, default=100, help="Save checkpoint every X steps")
     parser.add_argument("--eval_steps", type=int, default=100, help="Evaluate every X steps")
