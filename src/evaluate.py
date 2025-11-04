@@ -498,6 +498,18 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
             with open(samples_backup_path, "w", encoding="utf-8") as f:
                 json.dump(sample_predictions, f, indent=2, ensure_ascii=False)
 
+            # Mirror to WANDB Cloud periodically to prevent Kaggle crash erasure
+            if HAS_WANDB and wandb.run is not None:
+                try:
+                    artifact = wandb.Artifact(
+                        name=f"run-{wandb.run.id}-eval-{tag}",
+                        type="eval-backup"
+                    )
+                    artifact.add_file(samples_backup_path)
+                    wandb.run.log_artifact(artifact, aliases=[f"step_{idx}", "latest"])
+                except Exception:
+                    pass # silent fail to prevent inference loop crash
+
     elapsed = time.time() - start_time
 
     # ── Global Metrics (Basic Classification) ──
