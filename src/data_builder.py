@@ -246,6 +246,10 @@ def extract_sliding_windows(image_path, mask_path=None, stride=200):
     positive_patches = []
     negative_patches = []
 
+    y_steps = max(1, (h - CROP_SIZE) // stride + 1)
+    x_steps = max(1, (w - CROP_SIZE) // stride + 1)
+    used_starts = set()
+
     for ys in range(y_steps + 1):
         for xs in range(x_steps + 1):
             y_start = min(ys * stride, h - CROP_SIZE)
