@@ -242,14 +242,10 @@ def extract_sliding_windows(image_path, mask_path=None, stride=200):
                 if w_b * h_b >= 25: # Drop microscopic pixel noise
                     global_defects.append((y, x, y + h_b, x + w_b))
 
-    patches = []
-    # Dynamic computation of optimal steps along both axes
-    y_steps = max(1, (h - CROP_SIZE) // stride + 1)
-    x_steps = max(1, (w - CROP_SIZE) // stride + 1)
-    
-    # Track used coordinates to avoid redundant identical edge patches
-    used_starts = set()
-    
+    # --- Hard Negative Mining Logic ---
+    positive_patches = []
+    negative_patches = []
+
     for ys in range(y_steps + 1):
         for xs in range(x_steps + 1):
             y_start = min(ys * stride, h - CROP_SIZE)
@@ -278,11 +274,15 @@ def extract_sliding_windows(image_path, mask_path=None, stride=200):
                 x1 = min(b[1] for b in local_boxes)
                 y2 = max(b[2] for b in local_boxes)
                 x2 = max(b[3] for b in local_boxes)
-                patches.append({"img": patch_img, "label": 1, "bbox": (y1, x1, y2, x2)})
+                positive_patches.append({"img": patch_img, "label": 1, "bbox": (y1, x1, y2, x2)})
             else:
-                patches.append({"img": patch_img, "label": 0, "bbox": None})
+                negative_patches.append({"img": patch_img, "label": 0, "bbox": None})
 
-    return patches
+    # Return ALL positive crops. But randomly sample only 1 or 2 hard negative crops per image to prevent memory explosion.
+    import random
+    hard_negatives = random.sample(negative_patches, min(2, len(negative_patches))) if negative_patches else []
+    
+    return positive_patches + hard_negatives
 
 
 # ─── Directory Scanning ──────────────────────────────────────────────────────
@@ -401,8 +401,27 @@ def export_jsonl(df, jsonl_path, image_output_dir, is_train=True):
         mask_path = row.get("mask_path") if row["label"] == 1 else None
         
         if is_train:
-            # Shred image into multiple 336x336 zoomed grids native to evaluation loops
-            patches = extract_sliding_windows(row["path"], mask_path, stride=200)
+            patches = []
+            if row["label"] == 1:
+                # Shred anomalous image and extract exact defects + max 2 background patches
+                patches = extract_sliding_windows(row["path"], mask_path, stride=200)
+            else:
+                # Native Good Image: Do NOT shred mathematically. Random center-weighted crop 1x
+                img = cv2.imread(str(row["path"]), cv2.IMREAD_UNCHANGED)
+                if img is not None:
+                    img = ensure_rgb(img)
+                    h, w = img.shape[:2]
+                    y = random.randint(0, max(0, h - CROP_SIZE))
+                    x = random.randint(0, max(0, w - CROP_SIZE))
+                    patch_img = img[y:y+CROP_SIZE, x:x+CROP_SIZE]
+                    # handle minor edge letterboxing
+                    if patch_img.shape[0] < CROP_SIZE or patch_img.shape[1] < CROP_SIZE:
+                        padded = np.zeros((max(patch_img.shape[0], CROP_SIZE), max(patch_img.shape[1], CROP_SIZE), 3), dtype=patch_img.dtype)
+                        padded[:patch_img.shape[0], :patch_img.shape[1]] = patch_img
+                        patch_img = padded
+                    patch_img = patch_img[:CROP_SIZE, :CROP_SIZE]
+                    patches = [{"img": patch_img, "label": 0, "bbox": None}]
+                    
             for p in patches:
                 img_name = f"{row['category']}_{patch_id_counter:07d}.png"
                 out_img = os.path.join(image_output_dir, img_name)
@@ -415,7 +434,7 @@ def export_jsonl(df, jsonl_path, image_output_dir, is_train=True):
                     bbox_count += 1
                 
                 prompt = (
-                    "<image>\n"
+                    f"<image>\n"
                     f"Act as a Quality Assurance Engineer, analyze the surface of the "
                     f"[{row['category']}] component in this image patch. "
                     f"If a defect is found, report its type and bounding box coordinates "
