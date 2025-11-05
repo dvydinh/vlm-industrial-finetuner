@@ -392,6 +392,7 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
 
         img_path = os.path.join(image_dir, item["image"])
         image = Image.open(img_path).convert("RGB")
+        img_w, img_h = image.size
 
         gt_text = item["conversations"][1]["value"]
         y_t = classify_response(gt_text)
