@@ -25,6 +25,46 @@ INSTRUCTION_PROMPT = (
     "Với tư cách là kỹ sư KCS, hãy phân tích bề mặt linh kiện trong ảnh này."
 )
 
+# Known MVTec AD category names for auto-discovery
+MVTEC_CATEGORIES = {
+    "bottle", "cable", "capsule", "carpet", "grid",
+    "hazelnut", "leather", "metal_nut", "pill", "screw",
+    "tile", "toothbrush", "transistor", "wood", "zipper",
+}
+
+
+def auto_discover_mvtec(search_root="/kaggle/input"):
+    """
+    Auto-discover MVTec AD root directory under Kaggle input.
+    Searches for directories containing known MVTec category folders
+    (e.g. 'bottle', 'cable') with the expected train/good/ structure.
+    """
+    search_root = Path(search_root)
+    if not search_root.exists():
+        return None
+
+    # Walk up to 3 levels deep to find MVTec root
+    for depth1 in sorted(search_root.iterdir()):
+        if not depth1.is_dir():
+            continue
+
+        # Check if this directory directly contains MVTec categories
+        children = {d.name for d in depth1.iterdir() if d.is_dir()}
+        if len(children & MVTEC_CATEGORIES) >= 3:
+            print(f"  Auto-discovered MVTec AD root: {depth1}")
+            return depth1
+
+        # Check one level deeper
+        for depth2 in sorted(depth1.iterdir()):
+            if not depth2.is_dir():
+                continue
+            grandchildren = {d.name for d in depth2.iterdir() if d.is_dir()}
+            if len(grandchildren & MVTEC_CATEGORIES) >= 3:
+                print(f"  Auto-discovered MVTec AD root: {depth2}")
+                return depth2
+
+    return None
+
 
 def convert_to_rgb(image_path, output_path):
     """
@@ -150,7 +190,21 @@ def build_dataset(data_dir, output_dir):
     data_dir = Path(data_dir)
     output_dir = Path(output_dir)
 
-    print("Scanning MVTec AD directory...")
+    # Auto-discover MVTec AD root on Kaggle if provided path doesn't exist
+    if not data_dir.exists():
+        print(f"Path '{data_dir}' not found. Attempting auto-discovery...")
+        discovered = auto_discover_mvtec("/kaggle/input")
+        if discovered:
+            data_dir = discovered
+        else:
+            print(
+                "ERROR: Could not auto-discover MVTec AD dataset.\n"
+                "Please check your Kaggle input and specify --data_dir manually.\n"
+                "Run in a Kaggle cell:  !find /kaggle/input -maxdepth 3 -name 'bottle' -type d"
+            )
+            return
+
+    print(f"Scanning MVTec AD directory: {data_dir}")
     df = scan_mvtec_directory(data_dir)
 
     if len(df) == 0:
