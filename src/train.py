@@ -1,17 +1,15 @@
 """
 QLoRA Fine-tuning of LLaVA 1.5-7B for Industrial Defect Detection
 ===================================================================
-Uses 4-bit NormalFloat (NF4) quantization via bitsandbytes to compress the
-7B-parameter model from ~14GB down to ~4GB VRAM footprint.
+4-bit NormalFloat (NF4) quantization compresses 7B params from ~14GB to ~4GB VRAM.
+LoRA adapters target the LLM's Q-K-V-O self-attention projections.
+CLIP Vision Encoder remains frozen.
 
-LoRA adapters are injected ONLY into the LLM's Q-K-V self-attention projections.
-The CLIP Vision Encoder remains completely frozen.
+Designed for Kaggle GPU T4x2 (2×16GB VRAM).
 
-Designed to run on Kaggle GPU T4x2 (2×16GB VRAM).
-
-Usage (on Kaggle):
+Usage:
     !python vlm-industrial-finetuner/src/train.py \
-        --dataset /kaggle/input/<dataset-name> \
+        --dataset /kaggle/input/<dataset> \
         --output_dir /kaggle/working/lora_weights
 """
 
@@ -38,10 +36,8 @@ import wandb
 
 class MVTecInstructDataset(Dataset):
     """
-    Reads processed JSONL and serves image-text pairs for SFTTrainer.
-    Each sample follows LLaVA conversation format:
-        human: <image>\n[inspection prompt]
-        gpt:   [defect assessment in Vietnamese]
+    Multimodal instruction-tuning dataset for LLaVA.
+    Reads JSONL with image paths and conversation-format labels.
     """
 
     def __init__(self, jsonl_path, image_dir, processor, max_length=1024):
@@ -82,15 +78,15 @@ class MVTecInstructDataset(Dataset):
 # ─── Training ──────────────────────────────────────────────────────────────────
 
 def train(args):
-    # ── wandb ──
+    # wandb
     wandb.init(
         project="vlm-industrial-finetuner",
         name=f"qlora-llava-mvtec-r{args.lora_r}-lr{args.lr}",
         config=vars(args),
     )
 
-    # ── 4-bit NF4 Quantization ──
-    print("[1/5] Configuring 4-bit NormalFloat quantization (bitsandbytes)...")
+    # 4-bit NF4 Quantization
+    print("[1/5] Configuring 4-bit NormalFloat quantization...")
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_use_double_quant=True,
@@ -98,8 +94,8 @@ def train(args):
         bnb_4bit_compute_dtype=torch.float16,
     )
 
-    # ── Base Model ──
-    print("[2/5] Loading LLaVA 1.5-7B base model...")
+    # Base Model
+    print("[2/5] Loading LLaVA 1.5-7B...")
     model_id = "llava-hf/llava-1.5-7b-hf"
     processor = AutoProcessor.from_pretrained(model_id)
     model = LlavaForConditionalGeneration.from_pretrained(
@@ -109,14 +105,14 @@ def train(args):
     )
     model = prepare_model_for_kbit_training(model)
 
-    # ── LoRA Injection ──
-    print("[3/5] Injecting LoRA adapters (r={}, α={}) into Q-K-V projections...".format(
+    # LoRA — target all 4 self-attention projections in the LLM
+    print("[3/5] Injecting LoRA adapters (r={}, α={}) into Q-K-V-O projections...".format(
         args.lora_r, args.lora_alpha
     ))
     lora_config = LoraConfig(
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
-        target_modules=["q_proj", "v_proj"],
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
         lora_dropout=0.05,
         bias="none",
         task_type="CAUSAL_LM",
@@ -124,7 +120,7 @@ def train(args):
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
-    # ── Datasets ──
+    # Datasets
     print("[4/5] Loading datasets...")
     dataset_root = args.dataset
     train_dataset = MVTecInstructDataset(
@@ -133,19 +129,15 @@ def train(args):
         processor=processor,
         max_length=args.max_seq_length,
     )
-    # Use a small portion of training data for validation if no separate val set
-    test_jsonl = os.path.join(dataset_root, "test.jsonl")
-    test_image_dir = os.path.join(dataset_root, "images", "test")
-
     val_dataset = MVTecInstructDataset(
-        jsonl_path=test_jsonl,
-        image_dir=test_image_dir,
+        jsonl_path=os.path.join(dataset_root, "test.jsonl"),
+        image_dir=os.path.join(dataset_root, "images", "test"),
         processor=processor,
         max_length=args.max_seq_length,
     )
-    print(f"  Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples")
+    print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}")
 
-    # ── Training Arguments ──
+    # Training Arguments
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.batch_size,
@@ -170,8 +162,8 @@ def train(args):
         dataloader_pin_memory=False,
     )
 
-    # ── Trainer ──
-    print("[5/5] Initializing SFTTrainer...")
+    # Trainer
+    print("[5/5] Starting training...")
     trainer = SFTTrainer(
         model=model,
         train_dataset=train_dataset,
@@ -184,33 +176,25 @@ def train(args):
         callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
     )
 
-    print("Training started — monitor loss at https://wandb.ai")
     trainer.train()
 
-    # ── Save ──
     print(f"Saving LoRA adapter to {args.output_dir}/")
     model.save_pretrained(args.output_dir)
     processor.save_pretrained(args.output_dir)
     wandb.finish()
-
     print("Training complete.")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="QLoRA fine-tuning of LLaVA for MVTec AD defect detection"
-    )
-    parser.add_argument("--dataset", type=str, required=True,
-                        help="Path to processed dataset (contains train.jsonl, test.jsonl, images/)")
-    parser.add_argument("--output_dir", type=str, default="/kaggle/working/lora_weights",
-                        help="Directory to save LoRA adapter weights")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", type=str, required=True)
+    parser.add_argument("--output_dir", type=str, default="/kaggle/working/lora_weights")
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--grad_accum", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--lora_r", type=int, default=16)
-    parser.add_argument("--lora_alpha", type=int, default=32)
+    parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--lora_r", type=int, default=32)
+    parser.add_argument("--lora_alpha", type=int, default=64)
     parser.add_argument("--max_seq_length", type=int, default=1024)
     args = parser.parse_args()
-
     train(args)
