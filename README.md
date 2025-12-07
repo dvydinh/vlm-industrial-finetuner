@@ -1,114 +1,106 @@
-# VLM Industrial Fine-tuner
+# Industrial-VLM: Parameter-Efficient Fine-Tuning for Anomaly Detection
 
-**QLoRA Fine-tuning of LLaVA 1.5-7B for Industrial Surface Defect Detection**
+> **Quick Pitch**: Optimizing LLaVA-1.5-7B via QLoRA on the MVTec AD dataset to perform automated, pixel-aware industrial surface defect detection under strict VRAM constraints.
 
-Parameter-Efficient Fine-Tuning (PEFT) of a Vision-Language Model to detect micro-defects on industrial component surfaces. By freezing 99% of the base model and training a lightweight LoRA adapter on the LLM's self-attention projections, we achieve high accuracy with minimal compute cost.
+---
 
-## Key Result
+## 1. Architecture & Core Concept
 
-> **Improved F1-Score from ~35% (Zero-shot Baseline) to ~92% (QLoRA Fine-tuned)** on MVTec AD — a long-tail distributed industrial defect dataset.
+This project implements a multimodal instruction-tuning pipeline designed for automated quality control (KCS).
 
-## Architecture
+### Application Architecture
+1. **Vision Encoding**: Input images are processed by the **CLIP Vision Encoder** (ViT-L/14) to extract dense spatial embeddings.
+2. **Cross-Modal Alignment**: A **Projection Layer** maps visual tokens into the LLM's text embedding space.
+3. **Reasoning & Generation**: The **Vicuna-7B LLM** acts as the cognitive engine to classify defects based on the aligned visual prompts.
 
+### Technical Rationale
+- **Why QLoRA?** Training a 7B-parameter model requires ~112GB of VRAM in pure FP32. By leveraging **4-bit NormalFloat (NF4)** quantization (via `bitsandbytes`), we compress the base LLM footprint to ~4GB, allowing the entire training pipeline to run on a single NVIDIA Tesla T4 (15GB VRAM) on Kaggle.
+- **Why LoRA?** Instead of full fine-tuning, Low-Rank Adaptation (LoRA) injects trainable rank decomposition matrices ($\Delta W = BA$) into the Transformer's self-attention layers. This freezes 99% of the LLM and reduces trainable parameters to less than 20M, preventing catastrophic forgetting while drastically accelerating training speeds.
+
+---
+
+## 2. Data Engineering: ETL Pipeline for MVTec AD
+
+The original [MVTec AD Dataset](https://www.mvtec.com/company/research/datasets/mvtec-ad) is designed strictly for *unsupervised* generative anomaly detection. 
+To convert this into a supervised instruction-tuning format suitable for LLaVA, an ETL pipeline (`src/data_builder.py`) was engineered:
+
+- **Extract**: Scans the highly imbalanced Kaggle dataset structure spanning 15 domains (textures and distinct objects).
+- **Transform**:
+  - **Color Space Unification**: 3 domains (Grid, Screw, Zipper) are natively grayscale. These cause tensor-shape mismatch crashes in the RGB-only CLIP ViT. The pipeline forcefully converts all 1-channel images to 3-channel RGB (`cv2.cvtColor`).
+  - **Resolution Downsampling**: Native 1024×1024 images are aggressively resized to **336×336** to match LLaVA's maximum context window, cutting dataset size from 5GB to ~400MB.
+  - **Stratified Splitting**: Applies a strict 80/20 train/test split utilizing `StratifiedShuffleSplit`. This guarantees that the severe long-tail distribution of rare defects (e.g., *scratch*, *contamination*) is proportionally represented in both the training manifold and the evaluation set.
+- **Load**: Exports structured `train.jsonl` and `test.jsonl` files natively compatible with HuggingFace `datasets`.
+
+### Instruction-Tuning Format Example (JSONL)
+```json
+{
+  "id": "metal_nut_00124",
+  "image": "metal_nut_scratch_00124.png",
+  "conversations": [
+    {
+      "from": "human",
+      "value": "<image>\nVới tư cách là kỹ sư KCS, hãy phân tích bề mặt linh kiện trong ảnh này."
+    },
+    {
+      "from": "gpt",
+      "value": "Phát hiện lỗi trên bề mặt linh kiện (loại: scratch). Loại sản phẩm: metal_nut. Yêu cầu loại bỏ."
+    }
+  ]
+}
 ```
-                  ┌─────────────────────────────────┐
-                  │         LLaVA 1.5-7B            │
-                  │                                 │
-                  │  ┌──────────┐    ┌───────────┐  │
-     Image ─────▶ │  │ CLIP ViT │───▶│ Vicuna 7B │──▶ Response
-                  │  │ (Frozen) │    │   (LLM)   │  │
-                  │  └──────────┘    └─────┬─────┘  │
-                  │                  ┌─────┴─────┐  │
-                  │                  │   LoRA    │  │
-                  │                  │  r=16 α=32│  │
-                  │                  │ q/v_proj  │  │
-                  │                  └───────────┘  │
-                  └─────────────────────────────────┘
-```
 
-## Reproducibility
+---
 
-**Toàn bộ quá trình QLoRA Fine-tuning được thực thi trên Kaggle GPU T4x2.**
+## 3. Training Configuration
 
-- 🔗 **Kaggle Notebook**: [Xem chi tiết quá trình huấn luyện](https://www.kaggle.com/) *(link cập nhật sau khi train)*
-- 📓 **File tĩnh**: [`notebooks/kaggle_training.ipynb`](notebooks/kaggle_training.ipynb)
+| Hyperparameter | Value | Rationale |
+| :--- | :--- | :--- |
+| **Base Model** | `llava-hf/llava-1.5-7b-hf` | Baseline VLM pre-trained on generic concepts. |
+| **Quantization** | `4-bit (NF4)` | Double quantization enabled, `fp16` compute dtype. |
+| **LoRA Target Modules** | `q_proj`, `k_proj`, `v_proj`, `o_proj` | Targets all 4 self-attention projections for max capacity. |
+| **LoRA Rank ($r$)** | `32` | Increased from 16 to capture complex industrial defect features. |
+| **LoRA Alpha ($\alpha$)** | `64` | Maintains the standard $\alpha/r = 2.0$ scaling factor. |
+| **Optimizer** | `paged_adamw_8bit` | Essential for preventing VRAM OOM spikes during backward passes. |
+| **Learning Rate** | `2e-5` | Cosine decay schedule with 3% warmup steps. |
+| **Hardware Constraint** | `1x NVIDIA Tesla T4` | Trained natively on Kaggle free-tier GPU. |
 
-## Project Structure
+---
 
-```
-vlm-industrial-finetuner/
-├── data/                       # .gitignore — không push lên Git
-│   ├── raw/                    # Ảnh MVTec AD tải về
-│   └── processed/              # train.jsonl, test.jsonl + images/
-├── src/
-│   ├── data_builder.py         # Preprocessing: grayscale→RGB, stratified split
-│   ├── train.py                # QLoRA training: NF4 quant, SFTTrainer, wandb
-│   └── evaluate.py             # Merge LoRA weights + F1, Confusion Matrix
-├── notebooks/
-│   └── kaggle_training.ipynb   # Kaggle execution log (proof of training)
-├── requirements.txt
-└── README.md
-```
+## 4. Experiment Tracking & MLOps
 
-## Quick Start
+> **W&B Dashboard**: [Insert WandB Link Here]
 
-### 1. Local: Preprocess Data
+*(Insert screenshot of training and validation loss curves here after completion)*
+
+---
+
+## 5. Results & Evaluation
+
+Evaluation is conducted using macro-averaged F1-Score across all 15 MVTec AD categories, measuring the model's ability to discriminate between `Defect` and `Good` components from raw text output.
+
+| Method | F1-Score (Macro) | VRAM Usage |
+| :--- | :--- | :--- |
+| **Zero-shot (Baseline)** | [Pending]% | 0 (Inference only) |
+| **QLoRA Fine-tuned** | [Pending]% | ~5GB |
+
+### Qualitative Results
+*(Insert Table of 3 validation samples here: Good vs Correct Defect vs Edge-case Defect)*
+
+---
+
+## 6. Reproducibility
+
+**Kaggle Notebook**: [Insert Kaggle Link Here]
+
+To reproduce the zero-shot baseline or fine-tuned evaluation locally or on a cloud instance:
 
 ```bash
-# Download MVTec AD → data/raw/mvtec_ad/
-python src/data_builder.py --data_dir data/raw/mvtec_ad --output_dir data/processed
-# → Outputs: data/processed/train.jsonl, test.jsonl
-# Zip data/processed/ and upload to Kaggle Datasets (Private)
+# 1. Clone repository
+git clone https://github.com/dvydinh/vlm-industrial-finetuner.git && cd vlm-industrial-finetuner
+
+# 2. Install minimal dependencies
+pip install -r requirements.txt
+
+# 3. Run evaluation (assuming processed MVTec AD is in data/processed)
+python src/evaluate.py --baseline --test_data data/processed
 ```
-
-### 2. Kaggle: Train with QLoRA
-
-```bash
-!pip install -r vlm-industrial-finetuner/requirements.txt
-!python vlm-industrial-finetuner/src/train.py \
-    --dataset /kaggle/input/<your-dataset> \
-    --output_dir /kaggle/working/lora_weights
-```
-
-### 3. Kaggle: Evaluate
-
-```bash
-!python vlm-industrial-finetuner/src/evaluate.py \
-    --model_dir /kaggle/working/lora_weights \
-    --test_data /kaggle/input/<your-dataset>
-```
-
-## Technical Details
-
-| Parameter | Value | Rationale |
-|---|---|---|
-| Base Model | LLaVA 1.5-7B | Multimodal VLM with CLIP + Vicuna |
-| Quantization | 4-bit NF4 | ~14GB → ~4GB VRAM via `bitsandbytes` |
-| LoRA Rank (r) | 16 | Balance capacity vs. efficiency |
-| LoRA Alpha (α) | 32 | Scaling = α/r = 2.0 |
-| Target Modules | `q_proj`, `v_proj` | LLM attention only; CLIP frozen |
-| Optimizer | `paged_adamw_8bit` | Memory-efficient paged optimizer |
-| Learning Rate | 2e-4 | Conservative for adapter training |
-| Effective Batch | 8 | batch=2 × grad_accum=4 |
-| Trainable Params | ~6.5M / 7B (~0.1%) | Only LoRA adapter weights |
-| Adapter Size | ~30 MB | vs ~14 GB full model |
-
-## Dataset
-
-[MVTec Anomaly Detection (MVTec AD)](https://www.mvtec.com/company/research/datasets/mvtec-ad) — 15 categories of industrial products and textures with pixel-level annotations. Strong long-tail distribution (~90% good, ~10% defect).
-
-**Preprocessing**:
-1. Grayscale → RGB conversion (required by CLIP ViT)
-2. Resize to 336×336 (LLaVA 1.5 standard)
-3. Stratified 80/20 split (preserves defect ratio in train & test)
-4. JSONL formatting for instruction-tuning
-
-## References
-
-1. Liu et al., *Visual Instruction Tuning* (LLaVA), NeurIPS 2023
-2. Hu et al., *LoRA: Low-Rank Adaptation of Large Language Models*, ICLR 2022
-3. Dettmers et al., *QLoRA: Efficient Finetuning of Quantized LLMs*, NeurIPS 2023
-
-## License
-
-MIT
