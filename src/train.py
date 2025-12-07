@@ -7,6 +7,11 @@ CLIP Vision Encoder remains frozen.
 
 Designed for Kaggle GPU T4x2 (2×16GB VRAM).
 
+Outputs saved to /kaggle/working/results/:
+  - training_log.json   : Full training history (loss per step)
+  - training_config.json: Hyperparameters used
+  - lora_weights/       : LoRA adapter weights
+
 Usage:
     !python vlm-industrial-finetuner/src/train.py \
         --dataset /kaggle/input/<dataset> \
@@ -15,8 +20,10 @@ Usage:
 
 import os
 import json
+import time
 import torch
 import argparse
+from datetime import datetime
 from PIL import Image
 from torch.utils.data import Dataset
 
@@ -29,7 +36,15 @@ from transformers import (
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTTrainer
-import wandb
+
+# Try importing wandb; if unavailable, disable it gracefully
+try:
+    import wandb
+    HAS_WANDB = True
+except ImportError:
+    HAS_WANDB = False
+
+RESULTS_DIR = "/kaggle/working/results"
 
 
 # ─── Dataset ───────────────────────────────────────────────────────────────────
@@ -78,12 +93,45 @@ class MVTecInstructDataset(Dataset):
 # ─── Training ──────────────────────────────────────────────────────────────────
 
 def train(args):
-    # wandb
-    wandb.init(
-        project="vlm-industrial-finetuner",
-        name=f"qlora-llava-mvtec-r{args.lora_r}-lr{args.lr}",
-        config=vars(args),
-    )
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    start_time = time.time()
+
+    # ── Save config immediately ──
+    config_path = os.path.join(RESULTS_DIR, "training_config.json")
+    config_data = {
+        "timestamp": datetime.now().isoformat(),
+        "base_model": "llava-hf/llava-1.5-7b-hf",
+        "quantization": "4-bit NF4 (double quant, fp16 compute)",
+        "lora_r": args.lora_r,
+        "lora_alpha": args.lora_alpha,
+        "lora_target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+        "optimizer": "paged_adamw_8bit",
+        "learning_rate": args.lr,
+        "lr_scheduler": "cosine",
+        "warmup_ratio": 0.03,
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "gradient_accumulation_steps": args.grad_accum,
+        "effective_batch_size": args.batch_size * args.grad_accum,
+        "max_seq_length": args.max_seq_length,
+    }
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config_data, f, indent=2, ensure_ascii=False)
+    print(f"[LOG] Saved training config -> {config_path}")
+
+    # ── wandb ──
+    report_to = "none"
+    if HAS_WANDB:
+        try:
+            wandb.init(
+                project="vlm-industrial-finetuner",
+                name=f"qlora-llava-mvtec-r{args.lora_r}-lr{args.lr}",
+                config=config_data,
+            )
+            report_to = "wandb"
+            print("[LOG] W&B initialized successfully.")
+        except Exception as e:
+            print(f"[WARN] W&B init failed ({e}), logging to disk only.")
 
     # 4-bit NF4 Quantization
     print("[1/5] Configuring 4-bit NormalFloat quantization...")
@@ -138,6 +186,7 @@ def train(args):
     print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}")
 
     # Training Arguments
+    log_dir = os.path.join(RESULTS_DIR, "hf_logs")
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.batch_size,
@@ -149,6 +198,7 @@ def train(args):
         num_train_epochs=args.epochs,
         evaluation_strategy="steps",
         eval_steps=100,
+        logging_dir=log_dir,
         logging_steps=10,
         save_strategy="steps",
         save_steps=100,
@@ -157,7 +207,7 @@ def train(args):
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         fp16=True,
-        report_to="wandb",
+        report_to=report_to,
         remove_unused_columns=False,
         dataloader_pin_memory=False,
     )
@@ -178,11 +228,39 @@ def train(args):
 
     trainer.train()
 
+    # ── Save LoRA adapter ──
     print(f"Saving LoRA adapter to {args.output_dir}/")
     model.save_pretrained(args.output_dir)
     processor.save_pretrained(args.output_dir)
-    wandb.finish()
-    print("Training complete.")
+
+    # ── Export training log history as JSON ──
+    train_log_path = os.path.join(RESULTS_DIR, "training_log.json")
+    log_history = [entry for entry in trainer.state.log_history]
+    elapsed = time.time() - start_time
+
+    log_output = {
+        "timestamp": datetime.now().isoformat(),
+        "total_training_time_seconds": round(elapsed, 1),
+        "total_training_time_human": f"{int(elapsed // 3600)}h {int((elapsed % 3600) // 60)}m {int(elapsed % 60)}s",
+        "total_steps": trainer.state.global_step,
+        "best_eval_loss": trainer.state.best_metric,
+        "log_history": log_history,
+    }
+    with open(train_log_path, "w", encoding="utf-8") as f:
+        json.dump(log_output, f, indent=2, ensure_ascii=False)
+    print(f"[LOG] Saved training log ({len(log_history)} entries) -> {train_log_path}")
+
+    # ── Finish wandb ──
+    if HAS_WANDB and report_to == "wandb":
+        wandb.finish()
+        print("[LOG] W&B run finished and synced.")
+
+    print(f"\n{'='*60}")
+    print(f"  TRAINING COMPLETE")
+    print(f"  Duration     : {log_output['total_training_time_human']}")
+    print(f"  Best Val Loss: {trainer.state.best_metric:.4f}")
+    print(f"  Results Dir  : {RESULTS_DIR}")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":
