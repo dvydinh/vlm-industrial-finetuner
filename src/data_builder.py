@@ -20,11 +20,6 @@ from sklearn.model_selection import StratifiedShuffleSplit
 
 CLIP_RESOLUTION = (336, 336)
 
-INSTRUCTION_PROMPT = (
-    "<image>\n"
-    "Với tư cách là kỹ sư KCS, hãy phân tích bề mặt linh kiện trong ảnh này."
-)
-
 # Known MVTec AD category names for auto-discovery
 MVTEC_CATEGORIES = {
     "bottle", "cable", "capsule", "carpet", "grid",
@@ -161,11 +156,16 @@ def export_jsonl(df, jsonl_path, image_output_dir):
         if not convert_to_rgb(row["path"], out_img):
             continue
 
+        prompt = (
+            "<image>\n"
+            f"Với tư cách là kỹ sư KCS, hãy phân tích bề mặt linh kiện [{row['category']}] trong ảnh này."
+        )
+
         record = {
             "id": f"{row['category']}_{idx:05d}",
             "image": img_name,
             "conversations": [
-                {"from": "human", "value": INSTRUCTION_PROMPT},
+                {"from": "human", "value": prompt},
                 {"from": "gpt", "value": format_label(row)},
             ],
         }
