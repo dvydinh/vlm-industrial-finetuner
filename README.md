@@ -76,12 +76,26 @@ To convert this into a supervised instruction-tuning format suitable for LLaVA, 
 
 ## 5. Results & Evaluation
 
-Evaluation is conducted using macro-averaged F1-Score across all 15 MVTec AD categories, measuring the model's ability to discriminate between `Defect` and `Good` components from raw text output.
+Evaluation is conducted by running inference homogeneously across the entire test set but strictly computing **Item-Wise F1-Score (Macro)** to explicitly measure the model's capability to generalize and recognize defects accurately per material.
 
-| Method | F1-Score (Macro) | VRAM Usage |
+| Item Type | Zero-shot F1 | QLoRA F1 |
 | :--- | :--- | :--- |
-| **Zero-shot (Baseline)** | [Pending]% | 0 (Inference only) |
-| **QLoRA Fine-tuned** | [Pending]% | ~5GB |
+| Metal Nut | [Pending]% | [Pending]% |
+| Cable | [Pending]% | [Pending]% |
+| Leather | [Pending]% | [Pending]% |
+| Bottle | [Pending]% | [Pending]% |
+| Hazelnut | [Pending]% | [Pending]% |
+| Pill | [Pending]% | [Pending]% |
+| Transistor | [Pending]% | [Pending]% |
+| Zipper | [Pending]% | [Pending]% |
+| Carpet | [Pending]% | [Pending]% |
+| Grid | [Pending]% | [Pending]% |
+| Tile | [Pending]% | [Pending]% |
+| Wood | [Pending]% | [Pending]% |
+| Capsule | [Pending]% | [Pending]% |
+| Screw | [Pending]% | [Pending]% |
+| Toothbrush | [Pending]% | [Pending]% |
+| **Overall (Trung bình)** | **[Pending]%** | **[Pending]%** |
 
 ### Qualitative Results
 *(Insert Table of 3 validation samples here: Good vs Correct Defect vs Edge-case Defect)*
