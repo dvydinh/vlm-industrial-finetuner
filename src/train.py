@@ -33,9 +33,9 @@ from transformers import (
     BitsAndBytesConfig,
     TrainingArguments,
     EarlyStoppingCallback,
+    Trainer,
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from trl import SFTTrainer
 
 # Try importing wandb; if unavailable, disable it gracefully
 try:
@@ -87,7 +87,15 @@ class MVTecInstructDataset(Dataset):
             max_length=self.max_length,
             truncation=True,
         )
-        return {k: v.squeeze(0) for k, v in encoding.items()}
+        item_dict = {k: v.squeeze(0) for k, v in encoding.items()}
+        
+        # Causal LM requires `labels` (shifted internally by the model)
+        item_dict["labels"] = item_dict["input_ids"].clone()
+        # Ensure padding doesn't contribute to loss
+        if self.processor.tokenizer.pad_token_id is not None:
+            item_dict["labels"][item_dict["labels"] == self.processor.tokenizer.pad_token_id] = -100
+            
+        return item_dict
 
 
 # ─── Training ──────────────────────────────────────────────────────────────────
@@ -196,7 +204,7 @@ def train(args):
         warmup_ratio=0.03,
         optim="paged_adamw_8bit",
         num_train_epochs=args.epochs,
-        evaluation_strategy="steps",
+        eval_strategy="steps",
         eval_steps=100,
         logging_dir=log_dir,
         logging_steps=10,
@@ -214,14 +222,10 @@ def train(args):
 
     # Trainer
     print("[5/5] Starting training...")
-    trainer = SFTTrainer(
+    trainer = Trainer(
         model=model,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        peft_config=lora_config,
-        dataset_text_field="text",
-        max_seq_length=args.max_seq_length,
-        tokenizer=processor.tokenizer,
         args=training_args,
         callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
     )
