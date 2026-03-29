@@ -230,7 +230,7 @@ def train(args):
         callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
     )
 
-    trainer.train()
+    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
     # ── Save LoRA adapter ──
     print(f"Saving LoRA adapter to {args.output_dir}/")
@@ -278,5 +278,6 @@ if __name__ == "__main__":
     parser.add_argument("--lora_r", type=int, default=32)
     parser.add_argument("--lora_alpha", type=int, default=64)
     parser.add_argument("--max_seq_length", type=int, default=1024)
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to checkpoint directory to resume from")
     args = parser.parse_args()
     train(args)
