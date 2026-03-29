@@ -54,6 +54,18 @@ def load_base_model(base_model_id="llava-hf/llava-1.5-7b-hf"):
 
 def load_finetuned_model(model_dir, base_model_id="llava-hf/llava-1.5-7b-hf"):
     """Load base model and merge trained LoRA adapter."""
+    
+    # Auto-detect if user interrupted training and weights are in a checkpoint subdir
+    if not os.path.exists(os.path.join(model_dir, "adapter_config.json")):
+        print(f"[WARN] adapter_config.json not found in {model_dir}.")
+        subdirs = [os.path.join(model_dir, d) for d in os.listdir(model_dir) if d.startswith("checkpoint")]
+        if subdirs:
+            latest_checkpoint = max(subdirs, key=lambda x: int(x.split("-")[-1]))
+            print(f"[SYSTEM] Auto-redirecting to latest checkpoint: {latest_checkpoint}")
+            model_dir = latest_checkpoint
+        else:
+            raise FileNotFoundError(f"No LoRA adapter or checkpoints found in {model_dir}")
+
     print(f"Loading base model: {base_model_id}")
     processor = AutoProcessor.from_pretrained(base_model_id)
     model = LlavaForConditionalGeneration.from_pretrained(
