@@ -34,6 +34,7 @@ from transformers import (
     TrainingArguments,
     EarlyStoppingCallback,
     Trainer,
+    TrainerCallback,
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
@@ -99,6 +100,21 @@ class MVTecInstructDataset(Dataset):
 
 
 # ─── Training ──────────────────────────────────────────────────────────────────
+
+class WandbArtifactCallback(TrainerCallback):
+    """Uploads checkpoints to WandB periodically to prevent Kaggle data loss."""
+    def on_save(self, args, state, control, **kwargs):
+        if HAS_WANDB and wandb.run is not None:
+            chkpt_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
+            if os.path.exists(chkpt_dir):
+                print(f"[WANDB] 🚀 Syncing {chkpt_dir} to WandB cloud...")
+                artifact = wandb.Artifact(
+                    name=f"run-{wandb.run.id}-checkpoint-{state.global_step}",
+                    type="model-checkpoint",
+                    description=f"Automated checkpoint sync for step {state.global_step}"
+                )
+                artifact.add_dir(chkpt_dir)
+                wandb.run.log_artifact(artifact, aliases=[f"step_{state.global_step}", "latest"])
 
 def train(args):
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -227,7 +243,10 @@ def train(args):
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         args=training_args,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
+        callbacks=[
+            EarlyStoppingCallback(early_stopping_patience=3),
+            WandbArtifactCallback()
+        ],
     )
 
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
