@@ -132,15 +132,15 @@ def scan_mvtec_directory(data_dir):
 
 
 def format_label(row):
-    """Generate Vietnamese instruction-tuning label text."""
+    """Generate English instruction-tuning label text."""
     if row["label"] == 1:
         return (
-            f"Phát hiện lỗi trên bề mặt linh kiện (loại: {row['defect_type']}). "
-            f"Loại sản phẩm: {row['category']}. Yêu cầu loại bỏ."
+            f"Defect detected on the component surface (type: {row['defect_type']}). "
+            f"Product category: {row['category']}. Status: Rejected."
         )
     return (
-        f"Bề mặt linh kiện sạch, không phát hiện khuyết tật. "
-        f"Loại sản phẩm: {row['category']}. Đạt tiêu chuẩn KCS."
+        f"Component surface is clean, no defects detected. "
+        f"Product category: {row['category']}. Status: Passed QA."
     )
 
 
@@ -158,7 +158,7 @@ def export_jsonl(df, jsonl_path, image_output_dir):
 
         prompt = (
             "<image>\n"
-            f"Với tư cách là kỹ sư KCS, hãy phân tích bề mặt linh kiện [{row['category']}] trong ảnh này."
+            f"Act as a Quality Assurance Engineer, analyze the surface of the [{row['category']}] component in this image."
         )
 
         record = {

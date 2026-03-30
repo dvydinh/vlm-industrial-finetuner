@@ -84,11 +84,9 @@ def load_finetuned_model(model_dir, base_model_id="llava-hf/llava-1.5-7b-hf"):
 def classify_response(text):
     """Parse model response into binary label: 1=defect, 0=good."""
     text = text.lower()
-    defect_kw = ["lỗi", "nứt", "crack", "xước", "scratch", "loại bỏ",
-                 "defect", "khuyết", "dent", "contamination", "reject",
-                 "anomal", "broken", "damage"]
-    good_kw = ["sạch", "đạt", "không phát hiện", "good", "pass",
-               "tiêu chuẩn", "normal", "no defect", "clean"]
+    defect_kw = ["defect", "crack", "scratch", "dent", "contamination", 
+                 "reject", "anomal", "broken", "damage"]
+    good_kw = ["clean", "passed qa", "good", "pass", "normal", "no defect"]
 
     d = sum(1 for kw in defect_kw if kw in text)
     g = sum(1 for kw in good_kw if kw in text)
@@ -127,7 +125,7 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
 
         prompt = (
             f"USER: <image>\n"
-            f"Với tư cách là kỹ sư KCS, hãy phân tích bề mặt linh kiện [{cat_name}] trong ảnh này.\n"
+            f"Act as a Quality Assurance Engineer, analyze the surface of the [{cat_name}] component in this image.\n"
             f"ASSISTANT:"
         )
         inputs = processor(
