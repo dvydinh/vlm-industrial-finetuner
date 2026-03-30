@@ -39,11 +39,11 @@ To convert this into a supervised instruction-tuning format suitable for LLaVA, 
   "conversations": [
     {
       "from": "human",
-      "value": "<image>\nVới tư cách là kỹ sư KCS, hãy phân tích bề mặt linh kiện trong ảnh này."
+      "value": "<image>\nAct as a Quality Assurance Engineer, analyze the surface of the component in this image."
     },
     {
       "from": "gpt",
-      "value": "Phát hiện lỗi trên bề mặt linh kiện (loại: scratch). Loại sản phẩm: metal_nut. Yêu cầu loại bỏ."
+      "value": "Defect detected on the component surface (type: scratch). Product category: metal_nut. Status: Rejected."
     }
   ]
 }
@@ -76,7 +76,7 @@ To convert this into a supervised instruction-tuning format suitable for LLaVA, 
 
 ## 5. Results & Evaluation
 
-> **⚠️ Performance Disclaimer**: Sự suy giảm F1-Score trên các lỗi vi mô (micro-defects) phần lớn đến từ giới hạn Context Window 336px của mô hình CLIP. Việc ép ảnh chụp công nghiệp MVTec 1024x1024 xuống độ phân giải cố định 336x336 bằng interpolation đã làm xóa sổ hoàn toàn các vết xước siêu vi. Tương lai cần áp dụng Random Crop và Sliding Window để khắc phục.
+> **⚠️ Performance Disclaimer**: The reduction in F1-Score on micro-defects is primarily caused by the 336px Context Window limit of the CLIP model. Forcing MVTec 1024x1024 industrial images down to a fixed 336x336 resolution using interpolation completely destroys microscopic scratches. Future implementations should adopt Random Crop (training) and Sliding Window (inference) to preserve native resolution.
 
 Evaluation is conducted by running inference homogeneously across the entire test set but strictly computing **Item-Wise F1-Score (Macro)** to explicitly measure the model's capability to generalize and recognize defects accurately per material.
 
@@ -97,7 +97,7 @@ Evaluation is conducted by running inference homogeneously across the entire tes
 | Capsule | [Pending]% | [Pending]% |
 | Screw | [Pending]% | [Pending]% |
 | Toothbrush | [Pending]% | [Pending]% |
-| **Overall (Trung bình)** | **[Pending]%** | **[Pending]%** |
+| **Overall (Average)** | **[Pending]%** | **[Pending]%** |
 
 ### Qualitative Results
 *(Insert Table of 3 validation samples here: Good vs Correct Defect vs Edge-case Defect)*
