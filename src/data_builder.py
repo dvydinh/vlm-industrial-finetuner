@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.model_selection import train_test_split
 
 
 CLIP_RESOLUTION = (336, 336)
@@ -352,19 +352,9 @@ def format_label(row, bbox=None):
     if row["label"] == 1:
         if bbox is not None:
             ymin, xmin, ymax, xmax = bbox
-            return (
-                f"Defect detected: [{row['defect_type']}] at "
-                f"[{ymin}, {xmin}, {ymax}, {xmax}]. "
-                f"Product category: {row['category']}. Status: Rejected."
-            )
-        return (
-            f"Defect detected on the component surface (type: {row['defect_type']}). "
-            f"Product category: {row['category']}. Status: Rejected."
-        )
-    return (
-        "No defect detected. Component surface is clean. "
-        f"Product category: {row['category']}. Status: Passed QA."
-    )
+            return f"Detected [{row['defect_type']}] at [{ymin}, {xmin}, {ymax}, {xmax}]."
+        return f"Detected [{row['defect_type']}]."
+    return "Passed QA. No defects detected."
 
 
 # ─── JSONL Export ─────────────────────────────────────────────────────────────
@@ -469,12 +459,13 @@ def build_dataset(data_dir, output_dir):
           f"across {df['category'].nunique()} categories")
     print(f"  Ground truth masks found: {n_masks}/{n_defect} defective samples")
 
-    # Stratified split: 80% train, 20% test
-    splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.20, random_state=42)
-    train_idx, test_idx = next(splitter.split(df, df["label"]))
+    # Stratified split by *defect type* to prevent leakage of rare classes
+    df_train, df_test = train_test_split(
+        df, test_size=0.20, random_state=42, stratify=df["defect_type"]
+    )
 
-    df_train = df.iloc[train_idx].reset_index(drop=True)
-    df_test = df.iloc[test_idx].reset_index(drop=True)
+    df_train = df_train.reset_index(drop=True)
+    df_test = df_test.reset_index(drop=True)
 
     train_defect_ratio = df_train["label"].mean()
     test_defect_ratio = df_test["label"].mean()
