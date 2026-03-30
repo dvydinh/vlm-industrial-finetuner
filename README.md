@@ -76,6 +76,8 @@ To convert this into a supervised instruction-tuning format suitable for LLaVA, 
 
 ## 5. Results & Evaluation
 
+> **⚠️ Performance Disclaimer**: Sự suy giảm F1-Score trên các lỗi vi mô (micro-defects) phần lớn đến từ giới hạn Context Window 336px của mô hình CLIP. Việc ép ảnh chụp công nghiệp MVTec 1024x1024 xuống độ phân giải cố định 336x336 bằng interpolation đã làm xóa sổ hoàn toàn các vết xước siêu vi. Tương lai cần áp dụng Random Crop và Sliding Window để khắc phục.
+
 Evaluation is conducted by running inference homogeneously across the entire test set but strictly computing **Item-Wise F1-Score (Macro)** to explicitly measure the model's capability to generalize and recognize defects accurately per material.
 
 | Item Type | Zero-shot F1 | QLoRA F1 |
