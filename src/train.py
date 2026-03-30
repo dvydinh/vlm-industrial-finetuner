@@ -2,7 +2,7 @@
 QLoRA Fine-tuning of LLaVA 1.5-7B for Industrial Defect Detection
 ===================================================================
 4-bit NormalFloat (NF4) quantization compresses 7B params from ~14GB to ~4GB VRAM.
-LoRA adapters target the LLM's Q-K-V-O self-attention projections.
+LoRA adapters target the LLM's self-attention (Q-K-V-O) and MLP (gate-up-down) projections.
 CLIP Vision Encoder remains frozen.
 
 Designed for Kaggle GPU T4x2 (2×16GB VRAM).
@@ -140,7 +140,7 @@ def train(args):
         "quantization": "4-bit NF4 (double quant, fp16 compute)",
         "lora_r": args.lora_r,
         "lora_alpha": args.lora_alpha,
-        "lora_target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+        "lora_target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         "optimizer": "paged_adamw_8bit",
         "learning_rate": args.lr,
         "lr_scheduler": "cosine",
@@ -189,14 +189,14 @@ def train(args):
     )
     model = prepare_model_for_kbit_training(model)
 
-    # LoRA — target all 4 self-attention projections in the LLM
-    print("[3/5] Injecting LoRA adapters (r={}, α={}) into Q-K-V-O projections...".format(
+    # LoRA — target self-attention + MLP projections for visual grounding capacity
+    print("[3/5] Injecting LoRA adapters (r={}, α={}) into Q-K-V-O + MLP projections...".format(
         args.lora_r, args.lora_alpha
     ))
     lora_config = LoraConfig(
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         lora_dropout=0.05,
         bias="none",
         task_type="CAUSAL_LM",
