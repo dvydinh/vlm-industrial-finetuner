@@ -1,8 +1,14 @@
 """
-Evaluation pipeline for LLaVA industrial defect detection.
+Evaluation pipeline for LLaVA industrial defect detection (Visual Grounding).
 Supports two modes:
   --baseline : Zero-shot evaluation (base model without fine-tuning)
   default    : Fine-tuned evaluation (base model + merged LoRA adapter)
+
+Evaluation criteria (Visual Grounding):
+  A prediction is True Positive only if:
+    1. Defect class matches ground truth, AND
+    2. IoU(predicted_bbox, gt_bbox) > 0.5
+  Good samples: TP if model correctly predicts no defect.
 
 All results are automatically saved to /kaggle/working/results/:
   - eval_baseline.json  OR  eval_finetuned.json   : Full metrics
@@ -15,6 +21,7 @@ Usage:
 """
 
 import os
+import re
 import csv
 import json
 import time
@@ -37,6 +44,12 @@ from peft import PeftModel
 
 RESULTS_DIR = "/kaggle/working/results"
 
+# IoU threshold for a detection to count as True Positive
+IOU_THRESHOLD = 0.5
+
+
+# ─── Model Loading ────────────────────────────────────────────────────────────
+
 
 def load_base_model(base_model_id="llava-hf/llava-1.5-7b-hf"):
     """Load base LLaVA model for zero-shot evaluation."""
@@ -54,7 +67,7 @@ def load_base_model(base_model_id="llava-hf/llava-1.5-7b-hf"):
 
 def load_finetuned_model(model_dir, base_model_id="llava-hf/llava-1.5-7b-hf"):
     """Load base model and merge trained LoRA adapter."""
-    
+
     # Auto-detect if user interrupted training and weights are in a checkpoint subdir
     if not os.path.exists(os.path.join(model_dir, "adapter_config.json")):
         print(f"[WARN] adapter_config.json not found in {model_dir}.")
@@ -81,10 +94,81 @@ def load_finetuned_model(model_dir, base_model_id="llava-hf/llava-1.5-7b-hf"):
     return processor, model
 
 
+# ─── Bounding Box Parsing & IoU ──────────────────────────────────────────────
+
+
+def parse_bbox(text):
+    """
+    Extract bounding box coordinates [ymin, xmin, ymax, xmax] from model output.
+
+    Supports formats:
+        "at [45, 120, 200, 280]"
+        "[45, 120, 200, 280]"
+
+    Returns:
+        (ymin, xmin, ymax, xmax) as integers, or None if no bbox found.
+    """
+    pattern = r"\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]"
+    match = re.search(pattern, text)
+    if match:
+        return tuple(int(x) for x in match.groups())
+    return None
+
+
+def parse_defect_class(text):
+    """
+    Extract defect class name from model output.
+
+    Supports formats:
+        "Defect detected: [scratch] at ..."
+        "Defect detected: [broken_large] at ..."
+
+    Returns:
+        Class name string, or None if no match.
+    """
+    pattern = r"Defect detected:\s*\[(\w+)\]"
+    match = re.search(pattern, text)
+    if match:
+        return match.group(1)
+    return None
+
+
+def compute_iou(box_a, box_b):
+    """
+    Compute Intersection over Union (IoU) for two axis-aligned bounding boxes.
+
+    Args:
+        box_a: (ymin, xmin, ymax, xmax)
+        box_b: (ymin, xmin, ymax, xmax)
+
+    Returns:
+        IoU value in [0.0, 1.0].
+    """
+    y1 = max(box_a[0], box_b[0])
+    x1 = max(box_a[1], box_b[1])
+    y2 = min(box_a[2], box_b[2])
+    x2 = min(box_a[3], box_b[3])
+
+    inter_area = max(0, y2 - y1) * max(0, x2 - x1)
+
+    area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+    area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+
+    union_area = area_a + area_b - inter_area
+
+    if union_area == 0:
+        return 0.0
+
+    return inter_area / union_area
+
+
+# ─── Response Classification ─────────────────────────────────────────────────
+
+
 def classify_response(text):
     """Parse model response into binary label: 1=defect, 0=good."""
     text = text.lower()
-    defect_kw = ["defect", "crack", "scratch", "dent", "contamination", 
+    defect_kw = ["defect", "crack", "scratch", "dent", "contamination",
                  "reject", "anomal", "broken", "damage"]
     good_kw = ["clean", "passed qa", "good", "pass", "normal", "no defect"]
 
@@ -93,8 +177,17 @@ def classify_response(text):
     return 1 if d > g else 0
 
 
+# ─── Evaluation ──────────────────────────────────────────────────────────────
+
+
 def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
-    """Run inference on the test JSONL and compute metrics. Auto-saves all results."""
+    """
+    Run inference on the test JSONL and compute visual grounding metrics.
+
+    Evaluation uses a strict criterion:
+      - For defective samples: TP requires correct class AND IoU > 0.5
+      - For good samples: TP requires correct "no defect" prediction
+    """
     os.makedirs(RESULTS_DIR, exist_ok=True)
     tag = "baseline" if is_baseline else "finetuned"
     start_time = time.time()
@@ -108,8 +201,11 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
     print(f"\nRunning {label} evaluation on {len(samples)} test samples...\n")
 
     y_true_all, y_pred_all = [], []
-    category_metrics = defaultdict(lambda: {"y_true": [], "y_pred": []})
-    sample_predictions = []  # Raw predictions for audit trail
+    # Strict predictions: accounts for IoU + class match
+    y_pred_strict = []
+    category_metrics = defaultdict(lambda: {"y_true": [], "y_pred": [], "y_pred_strict": []})
+    sample_predictions = []
+    iou_scores = []  # Track IoU for defective samples with bbox
 
     for item in tqdm(samples, desc=f"{label} Inference"):
         img_path = os.path.join(image_dir, item["image"])
@@ -119,13 +215,20 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
         y_t = classify_response(gt_text)
         y_true_all.append(y_t)
 
+        # Parse ground truth bbox and class from JSONL
+        gt_bbox = tuple(item["gt_bbox"]) if item.get("gt_bbox") else None
+        gt_class = item.get("gt_class", "good")
+
         # Parse category from id (e.g. "metal_nut_00124" -> "metal_nut")
         cat_name = "_".join(item["id"].split("_")[:-1])
         category_metrics[cat_name]["y_true"].append(y_t)
 
         prompt = (
             f"USER: <image>\n"
-            f"Act as a Quality Assurance Engineer, analyze the surface of the [{cat_name}] component in this image.\n"
+            f"Act as a Quality Assurance Engineer, analyze the surface of the "
+            f"[{cat_name}] component in this image. "
+            f"If a defect is found, report its type and bounding box coordinates "
+            f"[ymin, xmin, ymax, xmax].\n"
             f"ASSISTANT:"
         )
         inputs = processor(
@@ -139,9 +242,36 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
         if "ASSISTANT:" in response:
             response = response.split("ASSISTANT:")[-1].strip()
 
+        # Basic binary classification
         y_p = classify_response(response)
         y_pred_all.append(y_p)
         category_metrics[cat_name]["y_pred"].append(y_p)
+
+        # Strict visual grounding evaluation
+        pred_bbox = parse_bbox(response)
+        pred_class = parse_defect_class(response)
+        iou = 0.0
+        strict_correct = False
+
+        if y_t == 0:
+            # Good sample: strict TP if model correctly says no defect
+            strict_correct = (y_p == 0)
+            y_p_strict = 0 if strict_correct else 1
+        elif y_t == 1:
+            # Defective sample: require class match + IoU > threshold
+            if y_p == 1 and gt_bbox is not None and pred_bbox is not None:
+                iou = compute_iou(pred_bbox, gt_bbox)
+                iou_scores.append(iou)
+                class_match = (pred_class == gt_class) if pred_class else False
+                strict_correct = class_match and (iou > IOU_THRESHOLD)
+            elif y_p == 1 and gt_bbox is None:
+                # No ground truth bbox available - fall back to class-only check
+                class_match = (pred_class == gt_class) if pred_class else False
+                strict_correct = class_match
+            y_p_strict = 0 if not strict_correct else 1
+
+        y_pred_strict.append(y_p_strict)
+        category_metrics[cat_name]["y_pred_strict"].append(y_p_strict)
 
         # Save raw prediction for audit
         sample_predictions.append({
@@ -149,48 +279,69 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
             "category": cat_name,
             "image": item["image"],
             "ground_truth": "defect" if y_t == 1 else "good",
+            "gt_class": gt_class,
+            "gt_bbox": list(gt_bbox) if gt_bbox else None,
             "prediction": "defect" if y_p == 1 else "good",
-            "correct": y_t == y_p,
-            "model_response": response[:300],  # Truncate for readability
+            "pred_class": pred_class,
+            "pred_bbox": list(pred_bbox) if pred_bbox else None,
+            "iou": round(iou, 4) if gt_bbox and pred_bbox else None,
+            "strict_correct": strict_correct,
+            "model_response": response[:300],
         })
 
     elapsed = time.time() - start_time
 
-    # ── Global Metrics ──
+    # ── Global Metrics (Basic Classification) ──
     f1 = f1_score(y_true_all, y_pred_all, average="macro")
     precision = precision_score(y_true_all, y_pred_all, average="macro", zero_division=0)
-    recall = recall_score(y_true_all, y_pred_all, average="macro", zero_division=0)
+    recall_val = recall_score(y_true_all, y_pred_all, average="macro", zero_division=0)
     cm = confusion_matrix(y_true_all, y_pred_all)
     report = classification_report(
         y_true_all, y_pred_all, target_names=["Good", "Defect"], digits=4, zero_division=0
     )
+
+    # ── Strict Grounding Metrics (Class + IoU > 0.5) ──
+    f1_strict = f1_score(y_true_all, y_pred_strict, average="macro")
+    precision_strict = precision_score(y_true_all, y_pred_strict, average="macro", zero_division=0)
+    recall_strict = recall_score(y_true_all, y_pred_strict, average="macro", zero_division=0)
+    mean_iou = float(np.mean(iou_scores)) if iou_scores else 0.0
 
     # ── Print to console ──
     print("\n" + "=" * 60)
     print(f"  {label} OVERALL EVALUATION RESULTS")
     print("=" * 60)
     print(f"  Total Samples  : {len(y_true_all)}")
-    print(f"  Overall F1 (Ma): {f1:.4f}")
+    print(f"  --- Basic Classification ---")
+    print(f"  F1 (Macro)     : {f1:.4f}")
     print(f"  Precision      : {precision:.4f}")
-    print(f"  Recall         : {recall:.4f}")
+    print(f"  Recall         : {recall_val:.4f}")
+    print(f"  --- Visual Grounding (Class + IoU>{IOU_THRESHOLD}) ---")
+    print(f"  F1 (Strict)    : {f1_strict:.4f}")
+    print(f"  Precision (S)  : {precision_strict:.4f}")
+    print(f"  Recall (S)     : {recall_strict:.4f}")
+    print(f"  Mean IoU       : {mean_iou:.4f} (over {len(iou_scores)} bbox pairs)")
     print(f"  Duration       : {int(elapsed // 60)}m {int(elapsed % 60)}s")
     print(f"\n{report}")
-    print("Confusion Matrix:")
+    print("Confusion Matrix (basic):")
     print(cm)
 
     print("\n" + "=" * 60)
-    print(f"  {label} ITEM-WISE F1-SCORE (MACRO)")
+    print(f"  {label} ITEM-WISE F1-SCORE")
     print("=" * 60)
-    print(f"  {'Item Type':<20} | {'Samples':<10} | {'F1-Score':<10}")
-    print("-" * 46)
+    print(f"  {'Item Type':<20} | {'Samples':<10} | {'F1 Basic':<10} | {'F1 Strict':<10}")
+    print("-" * 60)
 
     cat_f1s = {}
+    cat_f1s_strict = {}
     for cat, data in sorted(category_metrics.items()):
         cat_y_true = data["y_true"]
         cat_y_pred = data["y_pred"]
+        cat_y_pred_s = data["y_pred_strict"]
         cat_f1 = f1_score(cat_y_true, cat_y_pred, average="macro")
+        cat_f1_s = f1_score(cat_y_true, cat_y_pred_s, average="macro")
         cat_f1s[cat] = round(cat_f1, 4)
-        print(f"  {cat:<20} | {len(cat_y_true):<10} | {cat_f1:.4f}")
+        cat_f1s_strict[cat] = round(cat_f1_s, 4)
+        print(f"  {cat:<20} | {len(cat_y_true):<10} | {cat_f1:.4f}     | {cat_f1_s:.4f}")
     print("=" * 60)
 
     # ══════════════════════════════════════════════════════════════
@@ -204,10 +355,18 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
         "mode": label,
         "duration_seconds": round(elapsed, 1),
         "total_samples": len(y_true_all),
-        "overall": {
+        "iou_threshold": IOU_THRESHOLD,
+        "overall_basic": {
             "f1_macro": round(f1, 4),
             "precision_macro": round(precision, 4),
-            "recall_macro": round(recall, 4),
+            "recall_macro": round(recall_val, 4),
+        },
+        "overall_strict": {
+            "f1_macro": round(f1_strict, 4),
+            "precision_macro": round(precision_strict, 4),
+            "recall_macro": round(recall_strict, 4),
+            "mean_iou": round(mean_iou, 4),
+            "bbox_pairs_evaluated": len(iou_scores),
         },
         "confusion_matrix": {
             "true_good_pred_good": int(cm[0][0]) if cm.shape[0] > 0 else 0,
@@ -215,7 +374,8 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
             "true_defect_pred_good": int(cm[1][0]) if cm.shape[0] > 1 else 0,
             "true_defect_pred_defect": int(cm[1][1]) if cm.shape[0] > 1 and cm.shape[1] > 1 else 0,
         },
-        "item_wise_f1": cat_f1s,
+        "item_wise_f1_basic": cat_f1s,
+        "item_wise_f1_strict": cat_f1s_strict,
     }
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(eval_report, f, indent=2, ensure_ascii=False)
@@ -225,10 +385,10 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
     csv_path = os.path.join(RESULTS_DIR, f"eval_{tag}_itemwise.csv")
     with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow(["item_type", "samples", "f1_score"])
+        writer.writerow(["item_type", "samples", "f1_basic", "f1_strict"])
         for cat, data in sorted(category_metrics.items()):
-            writer.writerow([cat, len(data["y_true"]), cat_f1s[cat]])
-        writer.writerow(["OVERALL", len(y_true_all), round(f1, 4)])
+            writer.writerow([cat, len(data["y_true"]), cat_f1s[cat], cat_f1s_strict[cat]])
+        writer.writerow(["OVERALL", len(y_true_all), round(f1, 4), round(f1_strict, 4)])
     print(f"[LOG] Saved item-wise CSV   -> {csv_path}")
 
     # 3. Raw sample predictions (JSON) - Full audit trail
@@ -241,7 +401,14 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
     print(f"  ALL RESULTS SAVED TO: {RESULTS_DIR}")
     print(f"{'='*60}\n")
 
-    return {"f1_macro": f1, "cat_f1s": cat_f1s, "precision": precision, "recall": recall}
+    return {
+        "f1_macro": f1,
+        "f1_strict": f1_strict,
+        "mean_iou": mean_iou,
+        "cat_f1s": cat_f1s,
+        "precision": precision,
+        "recall": recall_val,
+    }
 
 
 if __name__ == "__main__":
