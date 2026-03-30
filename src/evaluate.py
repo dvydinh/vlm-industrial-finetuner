@@ -120,13 +120,13 @@ def parse_defect_class(text):
     Extract defect class name from model output.
 
     Supports formats:
-        "Defect detected: [scratch] at ..."
-        "Defect detected: [broken_large] at ..."
+        "Detected [scratch] at ..."
+        "Detected [broken_large] at ..."
 
     Returns:
         Class name string, or None if no match.
     """
-    pattern = r"Defect detected:\s*\[(\w+)\]"
+    pattern = r"Detected\s*\[(\w+)\]"
     match = re.search(pattern, text)
     if match:
         return match.group(1)
