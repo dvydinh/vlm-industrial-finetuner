@@ -78,7 +78,8 @@ class MVTecInstructDataset(Dataset):
 
         user_msg = item["conversations"][0]["value"]
         assistant_msg = item["conversations"][1]["value"]
-        text = f"USER: {user_msg}\nASSISTANT: {assistant_msg}"
+        assistant_prefix = "ASSISTANT:"
+        text = f"USER: {user_msg}\n{assistant_prefix} {assistant_msg}"
 
         encoding = self.processor(
             text=text,
@@ -91,11 +92,22 @@ class MVTecInstructDataset(Dataset):
         item_dict = {k: v.squeeze(0) for k, v in encoding.items()}
         
         # Causal LM requires `labels` (shifted internally by the model)
-        item_dict["labels"] = item_dict["input_ids"].clone()
+        labels = item_dict["input_ids"].clone()
+        
+        # Mask the prompt with -100 so it doesn't contribute to the loss
+        input_ids_list = item_dict["input_ids"].tolist()
+        assistant_tokens = self.processor.tokenizer.encode(assistant_prefix, add_special_tokens=False)
+
+        for i in range(len(input_ids_list) - len(assistant_tokens)):
+            if input_ids_list[i:i+len(assistant_tokens)] == assistant_tokens:
+                labels[:i + len(assistant_tokens)] = -100
+                break
+
         # Ensure padding doesn't contribute to loss
         if self.processor.tokenizer.pad_token_id is not None:
-            item_dict["labels"][item_dict["labels"] == self.processor.tokenizer.pad_token_id] = -100
+            labels[labels == self.processor.tokenizer.pad_token_id] = -100
             
+        item_dict["labels"] = labels
         return item_dict
 
 

@@ -138,6 +138,9 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
             output = model.generate(**inputs, max_new_tokens=128, do_sample=False)
         response = processor.decode(output[0], skip_special_tokens=True)
 
+        if "ASSISTANT:" in response:
+            response = response.split("ASSISTANT:")[-1].strip()
+
         y_p = classify_response(response)
         y_pred_all.append(y_p)
         category_metrics[cat_name]["y_pred"].append(y_p)
