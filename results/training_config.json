@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-03-31T07:01:40.535884",
+  "timestamp": "2026-03-31T08:09:50.867565",
   "base_model": "llava-hf/llava-1.5-7b-hf",
   "quantization": "4-bit NF4 (double quant, fp16 compute)",
   "lora_r": 32,
