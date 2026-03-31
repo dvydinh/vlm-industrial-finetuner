@@ -399,7 +399,7 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
             "iou": round(iou, 4) if gt_bbox and norm_pred else None,
             "strict_correct": strict_correct,
             # Truncating response string if too long
-            "model_response": response[:300] if len(response) > 300 else response,
+            "model_response": f"Defect: {pred_class} at {norm_pred}" if y_p == 1 else "Good",
         })
 
         # --- CONTINUOUS SAVING & WANDB LOGGING ---
