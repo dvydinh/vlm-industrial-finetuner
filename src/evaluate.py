@@ -133,13 +133,25 @@ def parse_defect_class(text):
     return None
 
 
+def normalize_bbox(bbox):
+    """
+    Normalize bounding box coordinates to relative float values [0.0, 1.0].
+    - Baseline models often answer on a [0, 1000] scale.
+    - Ground Truth & Finetuned models use [0, 336] scale.
+    """
+    if bbox is None:
+        return None
+    scale = 1000.0 if any(v > 336 for v in bbox) else 336.0
+    return tuple(v / scale for v in bbox)
+
+
 def compute_iou(box_a, box_b):
     """
-    Compute Intersection over Union (IoU) for two axis-aligned bounding boxes.
+    Compute Intersection over Union (IoU) for two Bounding Boxes.
 
     Args:
-        box_a: (ymin, xmin, ymax, xmax)
-        box_b: (ymin, xmin, ymax, xmax)
+        box_a: (ymin, xmin, ymax, xmax) normalized in [0.0, 1.0]
+        box_b: (ymin, xmin, ymax, xmax) normalized in [0.0, 1.0]
 
     Returns:
         IoU value in [0.0, 1.0].
@@ -271,7 +283,9 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
         elif y_t == 1:
             # Defective sample: require class match + IoU > threshold
             if y_p == 1 and gt_bbox is not None and pred_bbox is not None:
-                iou = compute_iou(pred_bbox, gt_bbox)
+                norm_pred = normalize_bbox(pred_bbox)
+                norm_gt = normalize_bbox(gt_bbox)
+                iou = compute_iou(norm_pred, norm_gt)
                 iou_scores.append(iou)
                 class_match = (pred_class == gt_class) if pred_class else False
                 strict_correct = class_match and (iou > IOU_THRESHOLD)
