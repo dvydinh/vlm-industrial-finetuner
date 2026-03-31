@@ -93,41 +93,40 @@ class MVTecInstructDataset(Dataset):
         )
         item_dict = {k: v.squeeze(0) for k, v in encoding.items()}
         
-        # Causal LM requires `labels` (shifted internally by the model)
+        # Encode the exact prompt independently to find its exact token length
+        prompt_text = f"USER: {user_msg}\n{assistant_prefix}"
+        prompt_encoding = self.processor(
+            text=prompt_text,
+            images=image,
+            return_tensors="pt",
+            padding=False,
+            truncation=True,
+            max_length=self.max_length
+        )
+        prompt_len = prompt_encoding["input_ids"].shape[1]
+        
+        # Causal LM requires `labels`
         labels = item_dict["input_ids"].clone()
         
-        # Mask the prompt with -100 so it doesn't contribute to the loss
-        input_ids_list = item_dict["input_ids"].tolist()
-        assistant_tokens = self.processor.tokenizer.encode(assistant_prefix, add_special_tokens=False)
-
-        for i in range(len(input_ids_list) - len(assistant_tokens)):
-            if input_ids_list[i:i+len(assistant_tokens)] == assistant_tokens:
-                labels[:i + len(assistant_tokens)] = -100
-                break
-        else:
-            # Fallback if exact match fails due to LLaMA whitespace/newline tokenization anomalies
-            fallback_tokens = self.processor.tokenizer.encode("ASSISTANT", add_special_tokens=False)
-            if fallback_tokens:
-                for i in range(len(input_ids_list) - len(fallback_tokens)):
-                    if input_ids_list[i:i+len(fallback_tokens)] == fallback_tokens:
-                        labels[:i + len(fallback_tokens) + 1] = -100
-                        break
+        # Mask EVERYTHING up to the exact length of the prompt
+        # This guarantees 100% precision regardless of tokenizer merging quirks
+        labels[:prompt_len] = -100
 
         # Debug print for tokenizer boundary (-100 mask validation)
-        if not self.first_sample_printed:
+        if hasattr(self, "first_sample_printed") and not self.first_sample_printed:
             self.first_sample_printed = True
             print("\n" + "="*50)
             print("[DEBUG] DATASET MASKING VERIFICATION (First Sample)")
             print("="*50)
-            unmasked_indices = [idx for idx, val in enumerate(labels.tolist()) if val != -100]
-            if unmasked_indices:
-                first_valid = unmasked_indices[0]
-                masked_text = self.processor.tokenizer.decode(input_ids_list[:first_valid])
-                unmasked_text = self.processor.tokenizer.decode(input_ids_list[first_valid:first_valid+15])
+            print(f"[INFO] Prompt length: {prompt_len} tokens")
+            input_ids_list = item_dict["input_ids"].tolist()
+            if prompt_len < len(input_ids_list):
+                masked_text = self.processor.tokenizer.decode(input_ids_list[:prompt_len])
+                unmasked_text = self.processor.tokenizer.decode(input_ids_list[prompt_len:prompt_len+15])
                 print(f"[MASKED (-100)] -> '{masked_text}'")
                 print(f"[UNMASKED (Loss computed on)] -> '{unmasked_text}...'")
             else:
-                print("[WARNING] The entire sequence was masked! Loss will be 0.")
+                print("[WARNING] Prompt length exceeds or equals sequence length! Loss will be 0.")
             print("="*50 + "\n")
 
         # Ensure padding doesn't contribute to loss

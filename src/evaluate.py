@@ -167,13 +167,24 @@ def compute_iou(box_a, box_b):
 
 def classify_response(text):
     """Parse model response into binary label: 1=defect, 0=good."""
-    text = text.lower()
-    defect_kw = ["defect", "crack", "scratch", "dent", "contamination",
-                 "reject", "anomal", "broken", "damage"]
-    good_kw = ["clean", "passed qa", "good", "pass", "normal", "no defect"]
+    # 1. Ưu tiên: Nếu model xuất ra chuẩn format Fine-tuned (có chữ Detected [class])
+    parsed_class = parse_defect_class(text)
+    if parsed_class is not None:
+        return 1
+        
+    # 2. Nếu model trả lời rõ ràng là không có lỗi
+    text_lower = text.lower()
+    if "passed qa" in text_lower or "no defect" in text_lower:
+        return 0
 
-    d = sum(1 for kw in defect_kw if kw in text)
-    g = sum(1 for kw in good_kw if kw in text)
+    # 3. Fallback: Dùng cho Baseline Zero-shot (đếm từ khóa mở rộng)
+    defect_kw = ["defect", "crack", "scratch", "dent", "contamination",
+                 "reject", "anomal", "broken", "damage", "color", "cut", "hole", "thread", "print", "wire"]
+    good_kw = ["clean", "good", "pass", "normal", "perfect"]
+
+    d = sum(1 for kw in defect_kw if kw in text_lower)
+    g = sum(1 for kw in good_kw if kw in text_lower)
+    
     return 1 if d > g else 0
 
 
