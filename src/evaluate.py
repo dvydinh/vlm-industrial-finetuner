@@ -133,15 +133,15 @@ def parse_defect_class(text):
     return None
 
 
-def normalize_bbox(bbox):
+def normalize_bbox(bbox, is_baseline=False):
     """
     Normalize bounding box coordinates to relative float values [0.0, 1.0].
-    - Baseline models often answer on a [0, 1000] scale.
-    - Ground Truth & Finetuned models use [0, 336] scale.
+    - Baseline models intrinsically answer on a [0, 999] scale.
+    - Ground Truth & Finetuned models use [0, 335] scale.
     """
     if bbox is None:
         return None
-    scale = 1000.0 if any(v > 336 for v in bbox) else 336.0
+    scale = 1000.0 if is_baseline else 336.0
     return tuple(v / scale for v in bbox)
 
 
@@ -283,8 +283,9 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
         elif y_t == 1:
             # Defective sample: require class match + IoU > threshold
             if y_p == 1 and gt_bbox is not None and pred_bbox is not None:
-                norm_pred = normalize_bbox(pred_bbox)
-                norm_gt = normalize_bbox(gt_bbox)
+                # Truyền is_baseline vào để quy đổi đúng hệ tọa độ
+                norm_pred = normalize_bbox(pred_bbox, is_baseline)
+                norm_gt = normalize_bbox(gt_bbox, is_baseline=False) # GT luôn là 336
                 iou = compute_iou(norm_pred, norm_gt)
                 iou_scores.append(iou)
                 class_match = (pred_class == gt_class) if pred_class else False

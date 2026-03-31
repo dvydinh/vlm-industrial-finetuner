@@ -217,12 +217,23 @@ def ensure_rgb(img):
 
 
 def process_good_image(image_path, output_path):
-    """Resize a defect-free image to 336x336 (no crop needed)."""
+    """Random crop a defect-free image to 336x336 to match defect texture scale."""
     img = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
     if img is None:
         return False
     img = ensure_rgb(img)
-    img = cv2.resize(img, CLIP_RESOLUTION, interpolation=cv2.INTER_AREA)
+    
+    h, w = img.shape[:2]
+    # Random crop để giữ nguyên scale chi tiết vật liệu giống như ảnh defect
+    if h > CROP_SIZE or w > CROP_SIZE:
+        y = random.randint(0, max(0, h - CROP_SIZE))
+        x = random.randint(0, max(0, w - CROP_SIZE))
+        img = img[y:y+CROP_SIZE, x:x+CROP_SIZE]
+        
+    # Resize nếu ảnh gốc nhỏ hơn 336 (Edge case)
+    if img.shape[0] != CROP_SIZE or img.shape[1] != CROP_SIZE:
+        img = cv2.resize(img, CLIP_RESOLUTION, interpolation=cv2.INTER_AREA)
+        
     cv2.imwrite(str(output_path), img)
     return True
 
