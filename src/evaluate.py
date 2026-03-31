@@ -42,6 +42,12 @@ from sklearn.metrics import (
 from transformers import AutoProcessor, LlavaForConditionalGeneration
 from peft import PeftModel
 
+try:
+    import wandb
+    HAS_WANDB = True
+except ImportError:
+    HAS_WANDB = False
+
 RESULTS_DIR = "/kaggle/working/results"
 
 # IoU threshold for a detection to count as True Positive
@@ -489,6 +495,48 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
     print(f"\n{'='*60}")
     print(f"  ALL RESULTS SAVED TO: {RESULTS_DIR}")
     print(f"{'='*60}\n")
+    
+    # ══════════════════════════════════════════════════════════════
+    # WANDB CONTINUOUS LOGGING & RESCUE ARTIFACTS
+    # ══════════════════════════════════════════════════════════════
+    if HAS_WANDB:
+        print("\n  [WANDB] Syncing evaluation metrics & artifacts to cloud...")
+        try:
+            wandb.init(
+                project="vlm-industrial-finetuner",
+                name=f"eval-{tag}-{datetime.now().strftime('%Y%m%d-%H%M')}",
+                config={
+                    "mode": tag,
+                    "iou_threshold": IOU_THRESHOLD,
+                    "total_samples": len(y_true_all)
+                }
+            )
+            
+            # Log primary metrics
+            wandb.log({
+                "eval/f1_macro_basic": f1,
+                "eval/precision_basic": precision,
+                "eval/recall_basic": recall_val,
+                "eval/f1_macro_strict": f1_strict,
+                "eval/mean_iou": mean_iou
+            })
+            
+            # Pack and upload results folder as artifact
+            artifact = wandb.Artifact(
+                name=f"eval_{tag}_results",
+                type="evaluation-results",
+                description=f"CSV & JSON results for {tag} evaluation phase"
+            )
+            artifact.add_file(csv_path)
+            artifact.add_file(json_path)
+            if os.path.exists(samples_path):
+                artifact.add_file(samples_path)
+                
+            wandb.log_artifact(artifact)
+            wandb.finish()
+            print("  [WANDB] Sync complete! Your metrics and reports are safe.")
+        except Exception as e:
+            print(f"  [WANDB] Failed to log gracefully: {e}")
 
     return {
         "f1_macro": f1,

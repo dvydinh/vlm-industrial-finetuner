@@ -259,10 +259,10 @@ def train(args):
         optim="paged_adamw_8bit",
         num_train_epochs=args.epochs,
         eval_strategy="steps",
-        eval_steps=100,
+        eval_steps=args.eval_steps,
         logging_steps=10,
         save_strategy="steps",
-        save_steps=100,
+        save_steps=args.save_steps,
         save_total_limit=2,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
@@ -312,6 +312,21 @@ def train(args):
 
     # ── Finish wandb ──
     if HAS_WANDB and report_to == "wandb":
+        try:
+            print("[WANDB] 🚀 Uploading final LoRA adapter weights and logs as artifacts...")
+            artifact = wandb.Artifact(
+                name=f"run-{wandb.run.id}-final-model",
+                type="model-weights",
+                description="Final specialized industrial defect detection LoRA adapters"
+            )
+            artifact.add_dir(args.output_dir)
+            artifact.add_file(train_log_path)
+            artifact.add_file(config_path) # Assumes config_path was created earlier
+            wandb.run.log_artifact(artifact, aliases=["latest", "final"])
+            print("[WANDB] Final weights securely deposited to cloud.")
+        except Exception as e:
+            print(f"[WANDB] Failed to log final artifact: {e}")
+            
         wandb.finish()
         print("[LOG] W&B run finished and synced.")
 
@@ -334,6 +349,8 @@ if __name__ == "__main__":
     parser.add_argument("--lora_r", type=int, default=32)
     parser.add_argument("--lora_alpha", type=int, default=64)
     parser.add_argument("--max_seq_length", type=int, default=1024)
+    parser.add_argument("--save_steps", type=int, default=100, help="Save checkpoint every X steps")
+    parser.add_argument("--eval_steps", type=int, default=100, help="Evaluate every X steps")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to checkpoint directory to resume from")
     args = parser.parse_args()
     train(args)
