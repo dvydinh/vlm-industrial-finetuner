@@ -185,17 +185,17 @@ def compute_iou(box_a, box_b):
 
 def classify_response(text):
     """Parse model response into binary label: 1=defect, 0=good."""
-    # 1. Ưu tiên: Nếu model xuất ra chuẩn format Fine-tuned (có chữ Detected [class])
+    # 1. Priority: If model outputs fine-tuned format (contains "Detected [class]")
     parsed_class = parse_defect_class(text)
     if parsed_class is not None:
         return 1
         
-    # 2. Nếu model trả lời rõ ràng là không có lỗi
+    # 2. If model clearly states no defect found
     text_lower = text.lower()
     if "passed qa" in text_lower or "no defect" in text_lower:
         return 0
 
-    # 3. Fallback: Dùng cho Baseline Zero-shot (đếm từ khóa mở rộng)
+    # 3. Fallback: Used for Baseline Zero-shot (extended keyword counting)
     defect_kw = ["defect", "crack", "scratch", "dent", "contamination",
                  "reject", "anomal", "broken", "damage", "color", "cut", "hole", "thread", "print", "wire"]
     good_kw = ["clean", "good", "pass", "normal", "perfect"]
@@ -257,13 +257,13 @@ def sliding_window_inference(image, model, processor, prompt, is_baseline=False,
                     detected_class = local_class
                     
                 if local_bbox is not None:
-                    # Bước A: Normalize local bbox to float relative to 336 or 1000
+                    # Step A: Normalize local bbox to float relative to 336 or 1000
                     norm_local = normalize_bbox(local_bbox, is_baseline=is_baseline)
-                    # Bước B: Project to pixel counts within the 336x336 crop
+                    # Step B: Project to pixel counts within the 336x336 crop
                     ly1, lx1, ly2, lx2 = [n * crop_size for n in norm_local]
-                    # Bước C: Shift by the crop's top-left coordinates onto the global image
+                    # Step C: Shift by the crop's top-left coordinates onto the global image
                     gy1, gx1, gy2, gx2 = ly1 + y_start, lx1 + x_start, ly2 + y_start, lx2 + x_start
-                    # Bước D: Store as [0.0, 1.0] relative to the global high-res image
+                    # Step D: Store as [0.0, 1.0] relative to the global high-res image
                     global_defects.append((gy1 / img_h, gx1 / img_w, gy2 / img_h, gx2 / img_w))
                     
     if not global_defects:
@@ -345,7 +345,7 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
             f"[ymin, xmin, ymax, xmax].\n"
             f"ASSISTANT:"
         )
-        # Cập nhật: Sử dụng hệ thống Sliding Window Inference
+        # Updated: Use Sliding Window Inference system
         img_w, img_h = image.size
         y_p, pred_class, norm_pred = sliding_window_inference(
             image, model, processor, prompt, is_baseline=is_baseline
@@ -365,7 +365,7 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
         elif y_t == 1:
             # Defective sample: require class match + IoU > threshold
             if y_p == 1 and gt_bbox is not None and norm_pred is not None:
-                # Đưa Ground Truth về tọa độ tuyệt đối Float [0.0, 1.0] dựa vào img size
+                # Convert Ground Truth to absolute Float coords [0.0, 1.0] based on img size
                 norm_gt = (
                     gt_bbox[0] / img_h,
                     gt_bbox[1] / img_w,
