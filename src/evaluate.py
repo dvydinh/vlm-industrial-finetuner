@@ -297,6 +297,7 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
 
     print(f"\nRunning {label} evaluation on {len(samples)} test samples...\n")
 
+    global HAS_WANDB
     # Initialize wandb earlier to log incrementally
     if HAS_WANDB:
         try:
@@ -311,7 +312,6 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
             )
         except Exception as e:
             print(f"[WANDB] Failed to initialize: {e}")
-            global HAS_WANDB
             HAS_WANDB = False
 
     y_true_all, y_pred_all = [], []
