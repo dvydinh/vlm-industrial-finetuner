@@ -224,13 +224,13 @@ def process_good_image(image_path, output_path):
     img = ensure_rgb(img)
     
     h, w = img.shape[:2]
-    # Random crop để giữ nguyên scale chi tiết vật liệu giống như ảnh defect
+    # Random crop to preserve material detail scale similar to defect images
     if h > CROP_SIZE or w > CROP_SIZE:
         y = random.randint(0, max(0, h - CROP_SIZE))
         x = random.randint(0, max(0, w - CROP_SIZE))
         img = img[y:y+CROP_SIZE, x:x+CROP_SIZE]
         
-    # Resize nếu ảnh gốc nhỏ hơn 336 (Edge case)
+    # Resize if original image is smaller than 336 (Edge case)
     if img.shape[0] != CROP_SIZE or img.shape[1] != CROP_SIZE:
         img = cv2.resize(img, CLIP_RESOLUTION, interpolation=cv2.INTER_AREA)
         
