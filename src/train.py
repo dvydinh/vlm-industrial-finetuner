@@ -67,6 +67,8 @@ class MVTecInstructDataset(Dataset):
                 line = line.strip()
                 if line:
                     self.samples.append(json.loads(line))
+        
+        self.first_sample_printed = False
 
     def __len__(self):
         return len(self.samples)
@@ -102,6 +104,31 @@ class MVTecInstructDataset(Dataset):
             if input_ids_list[i:i+len(assistant_tokens)] == assistant_tokens:
                 labels[:i + len(assistant_tokens)] = -100
                 break
+        else:
+            # Fallback if exact match fails due to LLaMA whitespace/newline tokenization anomalies
+            fallback_tokens = self.processor.tokenizer.encode("ASSISTANT", add_special_tokens=False)
+            if fallback_tokens:
+                for i in range(len(input_ids_list) - len(fallback_tokens)):
+                    if input_ids_list[i:i+len(fallback_tokens)] == fallback_tokens:
+                        labels[:i + len(fallback_tokens) + 1] = -100
+                        break
+
+        # Debug print for tokenizer boundary (-100 mask validation)
+        if not self.first_sample_printed:
+            self.first_sample_printed = True
+            print("\n" + "="*50)
+            print("[DEBUG] DATASET MASKING VERIFICATION (First Sample)")
+            print("="*50)
+            unmasked_indices = [idx for idx, val in enumerate(labels.tolist()) if val != -100]
+            if unmasked_indices:
+                first_valid = unmasked_indices[0]
+                masked_text = self.processor.tokenizer.decode(input_ids_list[:first_valid])
+                unmasked_text = self.processor.tokenizer.decode(input_ids_list[first_valid:first_valid+15])
+                print(f"[MASKED (-100)] -> '{masked_text}'")
+                print(f"[UNMASKED (Loss computed on)] -> '{unmasked_text}...'")
+            else:
+                print("[WARNING] The entire sequence was masked! Loss will be 0.")
+            print("="*50 + "\n")
 
         # Ensure padding doesn't contribute to loss
         if self.processor.tokenizer.pad_token_id is not None:
