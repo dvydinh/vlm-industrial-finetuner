@@ -395,8 +395,8 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
             "gt_bbox": list(gt_bbox) if gt_bbox else None,
             "prediction": "defect" if y_p == 1 else "good",
             "pred_class": pred_class,
-            "pred_bbox": list(pred_bbox) if pred_bbox else None,
-            "iou": round(iou, 4) if gt_bbox and pred_bbox else None,
+            "pred_bbox": list(norm_pred) if norm_pred else None,
+            "iou": round(iou, 4) if gt_bbox and norm_pred else None,
             "strict_correct": strict_correct,
             # Truncating response string if too long
             "model_response": response[:300] if len(response) > 300 else response,

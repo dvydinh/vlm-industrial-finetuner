@@ -369,7 +369,7 @@ def format_label(row, bbox=None):
 # ─── JSONL Export ─────────────────────────────────────────────────────────────
 
 
-def export_jsonl(df, jsonl_path, image_output_dir):
+def export_jsonl(df, jsonl_path, image_output_dir, is_train=True):
     """Write instruction-tuning JSONL with bbox annotations and preprocessed images."""
     os.makedirs(image_output_dir, exist_ok=True)
     records = []
@@ -383,13 +383,27 @@ def export_jsonl(df, jsonl_path, image_output_dir):
         if row["label"] == 1:
             if not row.get("mask_path"):
                 continue  # Skip if no ground truth mask exists
-            success, bbox = process_defect_image(row["path"], row["mask_path"], out_img)
-            if not success or bbox is None:
-                continue  # Skip if bbox extraction fails
+            if is_train:
+                success, bbox = process_defect_image(row["path"], row["mask_path"], out_img)
+                if not success or bbox is None:
+                    continue  # Skip if bbox extraction fails
+            else:
+                # Test set evaluation image MUST NOT BE CROPPED to preserve sliding window context
+                img = cv2.imread(str(row["path"]), cv2.IMREAD_UNCHANGED)
+                img = ensure_rgb(img)
+                cv2.imwrite(out_img, img)
+                bbox = extract_bbox_from_mask(row["mask_path"])
+                if bbox is None: continue
             bbox_count += 1
         else:
-            if not process_good_image(row["path"], out_img):
-                continue
+            if is_train:
+                if not process_good_image(row["path"], out_img):
+                    continue
+            else:
+                # Test set good image MUST NOT BE CROPPED
+                img = cv2.imread(str(row["path"]), cv2.IMREAD_UNCHANGED)
+                img = ensure_rgb(img)
+                cv2.imwrite(out_img, img)
 
         prompt = (
             "<image>\n"
@@ -484,9 +498,9 @@ def build_dataset(data_dir, output_dir):
 
     os.makedirs(output_dir, exist_ok=True)
     print("\nExporting training set...")
-    export_jsonl(df_train, output_dir / "train.jsonl", output_dir / "images" / "train")
+    export_jsonl(df_train, output_dir / "train.jsonl", output_dir / "images" / "train", is_train=True)
     print("Exporting test set...")
-    export_jsonl(df_test, output_dir / "test.jsonl", output_dir / "images" / "test")
+    export_jsonl(df_test, output_dir / "test.jsonl", output_dir / "images" / "test", is_train=False)
 
     print(f"\nDataset ready at {output_dir}/")
     print("Next: zip the processed/ folder and upload to Kaggle Datasets.")
