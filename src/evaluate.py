@@ -203,6 +203,74 @@ def classify_response(text):
 # ─── Evaluation ──────────────────────────────────────────────────────────────
 
 
+def sliding_window_inference(image, model, processor, prompt, is_baseline=False, crop_size=336, stride=224):
+    """
+    Perform sliding window inference on a potentially high-resolution image.
+    Returns:
+        y_p_final: 1 if defect detected, 0 otherwise
+        detected_class: The defect class detected, or None
+        global_bbox_norm: tuple (gy1, gx1, gy2, gx2) normalized in [0.0, 1.0], or None
+    """
+    img_w, img_h = image.size
+    
+    global_defects = []
+    detected_class = None
+    y_p_final = 0
+    
+    for y_start in range(0, img_h, stride):
+        for x_start in range(0, img_w, stride):
+            y_end = min(img_h, y_start + crop_size)
+            x_end = min(img_w, x_start + crop_size)
+            
+            # Align windows at bottom/right edges to maintain exact crop_size if image is larger
+            if y_end - y_start < crop_size and img_h >= crop_size:
+                y_start = img_h - crop_size
+            if x_end - x_start < crop_size and img_w >= crop_size:
+                x_start = img_w - crop_size
+                
+            crop_img = image.crop((x_start, y_start, x_start + crop_size, y_start + crop_size))
+            
+            inputs = processor(
+                text=prompt, images=crop_img, return_tensors="pt"
+            ).to(model.device, torch.float16)
+
+            with torch.no_grad():
+                output = model.generate(**inputs, max_new_tokens=128, do_sample=False)
+            response = processor.decode(output[0], skip_special_tokens=True)
+
+            if "ASSISTANT:" in response:
+                response = response.split("ASSISTANT:")[-1].strip()
+                
+            y_p = classify_response(response)
+            if y_p == 1:
+                y_p_final = 1
+                local_bbox = parse_bbox(response)
+                local_class = parse_defect_class(response)
+                
+                if detected_class is None and local_class is not None:
+                    detected_class = local_class
+                    
+                if local_bbox is not None:
+                    # Bước A: Normalize local bbox to float relative to 336 or 1000
+                    norm_local = normalize_bbox(local_bbox, is_baseline=is_baseline)
+                    # Bước B: Project to pixel counts within the 336x336 crop
+                    ly1, lx1, ly2, lx2 = [n * crop_size for n in norm_local]
+                    # Bước C: Shift by the crop's top-left coordinates onto the global image
+                    gy1, gx1, gy2, gx2 = ly1 + y_start, lx1 + x_start, ly2 + y_start, lx2 + x_start
+                    # Bước D: Store as [0.0, 1.0] relative to the global high-res image
+                    global_defects.append((gy1 / img_h, gx1 / img_w, gy2 / img_h, gx2 / img_w))
+                    
+    if not global_defects:
+        return y_p_final, detected_class, None
+        
+    y1 = min(b[0] for b in global_defects)
+    x1 = min(b[1] for b in global_defects)
+    y2 = max(b[2] for b in global_defects)
+    x2 = max(b[3] for b in global_defects)
+    
+    return y_p_final, detected_class, (y1, x1, y2, x2)
+
+
 def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
     """
     Run inference on the test JSONL and compute visual grounding metrics.
@@ -254,25 +322,16 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
             f"[ymin, xmin, ymax, xmax].\n"
             f"ASSISTANT:"
         )
-        inputs = processor(
-            text=prompt, images=image, return_tensors="pt"
-        ).to(model.device, torch.float16)
+        # Cập nhật: Sử dụng hệ thống Sliding Window Inference
+        img_w, img_h = image.size
+        y_p, pred_class, norm_pred = sliding_window_inference(
+            image, model, processor, prompt, is_baseline=is_baseline
+        )
 
-        with torch.no_grad():
-            output = model.generate(**inputs, max_new_tokens=128, do_sample=False)
-        response = processor.decode(output[0], skip_special_tokens=True)
-
-        if "ASSISTANT:" in response:
-            response = response.split("ASSISTANT:")[-1].strip()
-
-        # Basic binary classification
-        y_p = classify_response(response)
         y_pred_all.append(y_p)
         category_metrics[cat_name]["y_pred"].append(y_p)
 
         # Strict visual grounding evaluation
-        pred_bbox = parse_bbox(response)
-        pred_class = parse_defect_class(response)
         iou = 0.0
         strict_correct = False
 
@@ -282,10 +341,14 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
             y_p_strict = 0 if strict_correct else 1
         elif y_t == 1:
             # Defective sample: require class match + IoU > threshold
-            if y_p == 1 and gt_bbox is not None and pred_bbox is not None:
-                # Truyền is_baseline vào để quy đổi đúng hệ tọa độ
-                norm_pred = normalize_bbox(pred_bbox, is_baseline)
-                norm_gt = normalize_bbox(gt_bbox, is_baseline=False) # GT luôn là 336
+            if y_p == 1 and gt_bbox is not None and norm_pred is not None:
+                # Đưa Ground Truth về tọa độ tuyệt đối Float [0.0, 1.0] dựa vào img size
+                norm_gt = (
+                    gt_bbox[0] / img_h,
+                    gt_bbox[1] / img_w,
+                    gt_bbox[2] / img_h,
+                    gt_bbox[3] / img_w
+                )
                 iou = compute_iou(norm_pred, norm_gt)
                 iou_scores.append(iou)
                 class_match = (pred_class == gt_class) if pred_class else False
