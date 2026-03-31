@@ -297,6 +297,23 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
 
     print(f"\nRunning {label} evaluation on {len(samples)} test samples...\n")
 
+    # Initialize wandb earlier to log incrementally
+    if HAS_WANDB:
+        try:
+            wandb.init(
+                project="vlm-industrial-finetuner",
+                name=f"eval-{tag}-{datetime.now().strftime('%Y%m%d-%H%M')}",
+                config={
+                    "mode": tag,
+                    "iou_threshold": IOU_THRESHOLD,
+                    "total_samples": len(samples)
+                }
+            )
+        except Exception as e:
+            print(f"[WANDB] Failed to initialize: {e}")
+            global HAS_WANDB
+            HAS_WANDB = False
+
     y_true_all, y_pred_all = [], []
     # Strict predictions: accounts for IoU + class match
     y_pred_strict = []
@@ -381,8 +398,30 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
             "pred_bbox": list(pred_bbox) if pred_bbox else None,
             "iou": round(iou, 4) if gt_bbox and pred_bbox else None,
             "strict_correct": strict_correct,
-            "model_response": response[:300],
+            # Truncating response string if too long
+            "model_response": response[:300] if len(response) > 300 else response,
         })
+
+        # --- CONTINUOUS SAVING & WANDB LOGGING ---
+        idx = len(y_true_all)
+        if idx % 50 == 0 or idx == len(samples):
+            # Compute current rolling macro f1
+            current_f1 = f1_score(y_true_all, y_pred_all, average="macro")
+            current_f1_strict = f1_score(y_true_all, y_pred_strict, average="macro")
+            current_mean_iou = float(np.mean(iou_scores)) if iou_scores else 0.0
+
+            if HAS_WANDB and wandb.run is not None:
+                wandb.log({
+                    "step": idx,
+                    "rolling/f1_basic": current_f1,
+                    "rolling/f1_strict": current_f1_strict,
+                    "rolling/mean_iou": current_mean_iou
+                })
+
+            # Save local backups continuously
+            samples_backup_path = os.path.join(RESULTS_DIR, f"eval_{tag}_samples_backup.json")
+            with open(samples_backup_path, "w", encoding="utf-8") as f:
+                json.dump(sample_predictions, f, indent=2, ensure_ascii=False)
 
     elapsed = time.time() - start_time
 
@@ -499,19 +538,9 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
     # ══════════════════════════════════════════════════════════════
     # WANDB CONTINUOUS LOGGING & RESCUE ARTIFACTS
     # ══════════════════════════════════════════════════════════════
-    if HAS_WANDB:
+    if HAS_WANDB and wandb.run is not None:
         print("\n  [WANDB] Syncing evaluation metrics & artifacts to cloud...")
         try:
-            wandb.init(
-                project="vlm-industrial-finetuner",
-                name=f"eval-{tag}-{datetime.now().strftime('%Y%m%d-%H%M')}",
-                config={
-                    "mode": tag,
-                    "iou_threshold": IOU_THRESHOLD,
-                    "total_samples": len(y_true_all)
-                }
-            )
-            
             # Log primary metrics
             wandb.log({
                 "eval/f1_macro_basic": f1,
@@ -532,7 +561,7 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
             if os.path.exists(samples_path):
                 artifact.add_file(samples_path)
                 
-            wandb.log_artifact(artifact)
+            wandb.run.log_artifact(artifact)
             wandb.finish()
             print("  [WANDB] Sync complete! Your metrics and reports are safe.")
         except Exception as e:
