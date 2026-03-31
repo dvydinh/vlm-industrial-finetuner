@@ -36,14 +36,16 @@ To convert this into a supervised instruction-tuning format suitable for LLaVA, 
 {
   "id": "metal_nut_00124",
   "image": "metal_nut_scratch_00124.png",
+  "gt_bbox": [120, 45, 150, 80],
+  "gt_class": "scratch",
   "conversations": [
     {
       "from": "human",
-      "value": "<image>\nAct as a Quality Assurance Engineer, analyze the surface of the component in this image."
+      "value": "<image>\nAct as a Quality Assurance Engineer, analyze the surface of the [metal_nut] component in this image. If a defect is found, report its type and bounding box coordinates [ymin, xmin, ymax, xmax]."
     },
     {
       "from": "gpt",
-      "value": "Defect detected on the component surface (type: scratch). Product category: metal_nut. Status: Rejected."
+      "value": "Detected [scratch] at [120, 45, 150, 80]."
     }
   ]
 }

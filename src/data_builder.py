@@ -350,10 +350,8 @@ def format_label(row, bbox=None):
         bbox: (ymin, xmin, ymax, xmax) in crop-local coords, or None.
     """
     if row["label"] == 1:
-        if bbox is not None:
-            ymin, xmin, ymax, xmax = bbox
-            return f"Detected [{row['defect_type']}] at [{ymin}, {xmin}, {ymax}, {xmax}]."
-        return f"Detected [{row['defect_type']}]."
+        ymin, xmin, ymax, xmax = bbox
+        return f"Detected [{row['defect_type']}] at [{ymin}, {xmin}, {ymax}, {xmax}]."
     return "Passed QA. No defects detected."
 
 
@@ -371,12 +369,13 @@ def export_jsonl(df, jsonl_path, image_output_dir):
         out_img = os.path.join(image_output_dir, img_name)
 
         bbox = None
-        if row["label"] == 1 and row.get("mask_path"):
+        if row["label"] == 1:
+            if not row.get("mask_path"):
+                continue  # Skip if no ground truth mask exists
             success, bbox = process_defect_image(row["path"], row["mask_path"], out_img)
-            if not success:
-                continue
-            if bbox is not None:
-                bbox_count += 1
+            if not success or bbox is None:
+                continue  # Skip if bbox extraction fails
+            bbox_count += 1
         else:
             if not process_good_image(row["path"], out_img):
                 continue
