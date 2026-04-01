@@ -1,0 +1,17 @@
+item_type,samples,f1_basic,f1_strict
+bottle,59,0.169,0.0
+cable,73,0.1978,0.0
+capsule,65,0.4758,0.1772
+carpet,71,0.8618,0.418
+grid,64,0.7234,0.3663
+hazelnut,88,0.2159,0.045
+leather,86,0.8346,0.3857
+metal_nut,78,0.2806,0.086
+pill,72,0.4062,0.0649
+screw,107,0.2291,0.0273
+tile,71,0.663,0.3576
+toothbrush,21,0.2222,0.0
+transistor,68,0.1053,0.0
+wood,59,0.4914,0.2518
+zipper,89,0.6629,0.3206
+OVERALL,1071,0.4723,0.2042
