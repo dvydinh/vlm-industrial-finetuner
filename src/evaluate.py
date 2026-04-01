@@ -352,8 +352,16 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
         except Exception as e:
             print(f"[WARNING] Could not load backup: {e}")
 
+    start_eval_time = time.time()
+    MAX_KAGGLE_RUNTIME = 11.5 * 3600  # 11.5 hours in seconds
 
     for item in tqdm(samples, desc=f"{label} Inference"):
+        # ── MLOPS: Graceful Timeout Strategy ──
+        if time.time() - start_eval_time > MAX_KAGGLE_RUNTIME:
+            print(f"\n[MLOPS] ⏳ WARNING: Reached 11.5 hours of continuous Kaggle runtime!")
+            print(f"[MLOPS] 🛑 Gracefully stopping evaluation to allow Kaggle to successfully export the output dataset.")
+            print(f"[MLOPS] ♻️ Please start a new session using Notebook 1.2 to resume from this point.\n")
+            break
         if item["id"] in evaluated_ids:
             continue
 
