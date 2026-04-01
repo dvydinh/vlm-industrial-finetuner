@@ -24,6 +24,10 @@ import pandas as pd
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 
+# ── MLOPS: DETERMINISTIC SEED ──
+random.seed(42)
+np.random.seed(42)
+
 
 CLIP_RESOLUTION = (336, 336)
 CROP_SIZE = 336
