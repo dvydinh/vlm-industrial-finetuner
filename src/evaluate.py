@@ -320,8 +320,43 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
     category_metrics = defaultdict(lambda: {"y_true": [], "y_pred": [], "y_pred_strict": []})
     sample_predictions = []
     iou_scores = []  # Track IoU for defective samples with bbox
+    
+    # ── MLOPS: AUTO-RESUME LOGIC ──
+    samples_backup_path = os.path.join(RESULTS_DIR, f"eval_{tag}_samples_backup.json")
+    evaluated_ids = set()
+
+    if os.path.exists(samples_backup_path):
+        print(f"\n[INFO] Found backup file at {samples_backup_path}. Resuming evaluation...\n")
+        try:
+            with open(samples_backup_path, "r", encoding="utf-8") as bf:
+                sample_predictions = json.load(bf)
+            for p in sample_predictions:
+                evaluated_ids.add(p["id"])
+                
+                cat_name = p.get("category", "_".join(p["id"].split("_")[:-1]))
+                y_t = 1 if p["ground_truth"] == "defect" else 0
+                y_p = 1 if p["prediction"] == "defect" else 0
+                y_true_all.append(y_t)
+                y_pred_all.append(y_p)
+                
+                y_p_s = 0 if p.get("strict_correct", False) else 1
+                y_pred_strict.append(y_p_s)
+                
+                category_metrics[cat_name]["y_true"].append(y_t)
+                category_metrics[cat_name]["y_pred"].append(y_p)
+                category_metrics[cat_name]["y_pred_strict"].append(y_p_s)
+                
+                if p.get("iou") is not None:
+                    iou_scores.append(p["iou"])
+            print(f"[INFO] Successfully loaded {len(evaluated_ids)} evaluated samples from backup.")
+        except Exception as e:
+            print(f"[WARNING] Could not load backup: {e}")
+
 
     for item in tqdm(samples, desc=f"{label} Inference"):
+        if item["id"] in evaluated_ids:
+            continue
+
         img_path = os.path.join(image_dir, item["image"])
         image = Image.open(img_path).convert("RGB")
 
