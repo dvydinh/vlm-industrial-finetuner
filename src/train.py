@@ -47,23 +47,6 @@ except ImportError:
 
 RESULTS_DIR = "/kaggle/working/results"
 
-class WandbArtifactCallback(TrainerCallback):
-    """Uploads LoRA checkpoints to WandB periodically to prevent Kaggle environment crash loss."""
-    def on_save(self, args, state, control, **kwargs):
-        if HAS_WANDB and wandb.run is not None:
-            checkpoint_path = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
-            if os.path.exists(checkpoint_path):
-                print(f"[WANDB] Syncing intermediate checkpoint-{state.global_step} to cloud...")
-                try:
-                    artifact = wandb.Artifact(
-                        name=f"run-{wandb.run.id}-checkpoint-{state.global_step}",
-                        type="model-weights"
-                    )
-                    artifact.add_dir(checkpoint_path)
-                    wandb.run.log_artifact(artifact, aliases=[f"step_{state.global_step}", "latest"])
-                except Exception as e:
-                    print(f"[WANDB] Graceful fail on logging interim artifact: {e}")
-
 
 # ─── Dataset ───────────────────────────────────────────────────────────────────
 
