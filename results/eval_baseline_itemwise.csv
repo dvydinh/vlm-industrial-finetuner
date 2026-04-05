@@ -1,0 +1,17 @@
+item_type,samples,f1_strict_binary,TP,FP,FN
+bottle,59,0.0,0,0,12
+cable,69,0.0,0,0,18
+capsule,65,0.0,0,0,17
+carpet,68,0.0,0,0,12
+grid,64,0.0,0,0,12
+hazelnut,84,0.0,0,0,17
+leather,86,0.0,0,0,21
+metal_nut,76,0.0,0,0,17
+pill,69,0.0,0,0,29
+screw,104,0.0,0,0,24
+tile,69,0.0,0,0,18
+toothbrush,21,0.0,0,0,6
+transistor,66,0.0,0,0,8
+wood,56,0.0,0,0,13
+zipper,89,0.0,0,0,22
+OVERALL,1045,0.0,0,0,246
