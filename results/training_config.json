@@ -1,0 +1,25 @@
+{
+  "timestamp": "2026-04-06T03:36:54.977191",
+  "base_model": "llava-hf/llava-1.5-7b-hf",
+  "quantization": "4-bit NF4 (double quant, fp16 compute)",
+  "lora_r": 64,
+  "lora_alpha": 128,
+  "lora_target_modules": [
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj"
+  ],
+  "optimizer": "paged_adamw_8bit",
+  "learning_rate": 2e-05,
+  "lr_scheduler": "cosine",
+  "warmup_ratio": 0.03,
+  "epochs": 5,
+  "batch_size": 4,
+  "gradient_accumulation_steps": 2,
+  "effective_batch_size": 8,
+  "max_seq_length": 1024
+}
