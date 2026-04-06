@@ -93,30 +93,24 @@ class MVTecInstructDataset(Dataset):
         )
         item_dict = {k: v.squeeze(0) for k, v in encoding.items()}
         
-        # Encode the exact target footprint we expect before the answer
-        target_seq = self.processor.tokenizer.encode("ASSISTANT:", add_special_tokens=False)
-        target_tensor = torch.tensor(target_seq, dtype=item_dict["input_ids"].dtype, device=item_dict["input_ids"].device)
-        
         # Causal LM requires `labels`
         labels = item_dict["input_ids"].clone()
         
-        # Find exact boundary
-        mask_idx = -1
-        seq_len = len(target_seq)
-        for i in range(len(labels) - seq_len):
-            if torch.equal(labels[i:i+seq_len], target_tensor):
-                mask_idx = i + seq_len
-                break
-                
-        if mask_idx != -1:
-            labels[:mask_idx] = -100
-            prompt_len = mask_idx # for debug purposes
-        else:
-            # Fallback if tokenizer merges ASSISTANT: heavily with prefixes
-            prompt_text = f"USER: {user_msg}\nASSISTANT:"
-            prompt_encoding = self.processor(text=prompt_text, images=image, return_tensors="pt", padding=False, truncation=True, max_length=self.max_length)
-            prompt_len = prompt_encoding["input_ids"].shape[1]
-            labels[:prompt_len] = -100
+        # Correctly mask out the entire prompt so that loss is ONLY computed on the defect response.
+        # We explicitly calculate the token length of the prefix to prevent BPE string-merging bugs.
+        prompt_text = f"USER: {user_msg}\n{assistant_prefix}"
+        prompt_encoding = self.processor(
+            text=prompt_text, 
+            images=image, 
+            return_tensors="pt", 
+            padding=False, 
+            truncation=True, 
+            max_length=self.max_length
+        )
+        prompt_len = prompt_encoding["input_ids"].shape[1]
+        
+        # Apply the -100 cross-entropy ignore mask up to the start of the assistant's answer
+        labels[:prompt_len] = -100
 
         # Debug print for tokenizer boundary (-100 mask validation)
         if hasattr(self, "first_sample_printed") and not self.first_sample_printed:

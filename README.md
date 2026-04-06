@@ -30,6 +30,10 @@ Training a multimodal 7B-parameter architecture natively demands ~112GB of VRAM.
 * **Adaptation**: Low-Rank Adaptation (LoRA) specifically targeting the self-attention manifold (`q_proj`, `k_proj`, `v_proj`, `o_proj`) with an atypically high mathematical rank (`r=64`, `alpha=128`). This high-rank injection preserves the dense high-frequency topological data required to classify microscopic industrial defects.
 * **Optimizer**: `paged_adamw_8bit` integrated with mixed-precision `fp16` computing to mitigate VRAM out-of-memory spikes.
 
+### Architectural Boundaries (Semantic vs Topological)
+It must be scientifically noted that the base **CLIP ViT-L/14 Vision Encoder** is fundamentally designed via Contrastive Learning on semantic web-scale data (distinguishing objects conceptually). It is not inherently designed for topological regression (measuring exact physical coordinates). 
+Therefore, achieving a strictly bounded mathematical Intersection over Union (IoU) > 0.5 using a frozen semantic encoder is structurally bounded. The current validation ceiling of `IoU 0.3554` firmly maps the absolute spatial limitation of injecting high-rank LoRA (`r=64`) cross-modal approximations without unfreezing the underlying Patch Projection matrices to recapture high-frequency visual details.
+
 ---
 
 ## 3. Data Engineering: ETL Pipeline for MVTec AD
