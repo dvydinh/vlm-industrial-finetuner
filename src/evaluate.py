@@ -471,7 +471,7 @@ def run_evaluation(processor, model, test_data_dir, label="", is_baseline=True):
             "gt_class": gt_class,
             "gt_bbox": list(gt_bbox) if gt_bbox else None,
             "prediction": "defect" if y_p == 1 else "good",
-            "model_response": f"Defect: {pred_class} at {norm_pred}" if y_p == 1 else "Good",
+            "model_response": json.dumps(pred_defects) if y_p == 1 else "Good",
         })
 
         # --- CONTINUOUS SAVING & WANDB LOGGING ---
