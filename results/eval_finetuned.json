@@ -1,0 +1,45 @@
+{
+  "timestamp": "2026-04-06T14:23:43.447413",
+  "mode": "FINE-TUNED MODEL",
+  "duration_seconds": 19204.6,
+  "total_samples": 1071,
+  "iou_threshold": 0.5,
+  "overall_basic": {
+    "f1_macro": 0.6007,
+    "precision_macro": 0.6797,
+    "recall_macro": 0.7366
+  },
+  "overall_strict": {
+    "f1_binary": 0.0989,
+    "precision_binary": 0.0684,
+    "recall_binary": 0.1786,
+    "mean_iou": 0.3554,
+    "bbox_pairs_evaluated": 246,
+    "total_TP": 45,
+    "total_FP": 613,
+    "total_FN": 207
+  },
+  "confusion_matrix_basic": {
+    "true_good_pred_good": 407,
+    "true_good_pred_defect": 412,
+    "true_defect_pred_good": 6,
+    "true_defect_pred_defect": 246
+  },
+  "item_wise_f1_strict_binary": {
+    "bottle": 0.0282,
+    "cable": 0.022,
+    "capsule": 0.05,
+    "carpet": 0.0476,
+    "grid": 0.2162,
+    "hazelnut": 0.0196,
+    "leather": 0.1395,
+    "metal_nut": 0.1,
+    "pill": 0.0625,
+    "screw": 0.0,
+    "tile": 0.4444,
+    "toothbrush": 0.0,
+    "transistor": 0.0526,
+    "wood": 0.3673,
+    "zipper": 0.2353
+  }
+}
