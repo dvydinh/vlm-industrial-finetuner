@@ -1,37 +1,48 @@
-# Industrial-VLM: Parameter-Efficient Fine-Tuning for Anomaly Detection
+# Industrial VLM: Parameter-Efficient Fine-Tuning for Anomaly Detection
 
-> **Quick Pitch**: Optimizing LLaVA-1.5-7B via QLoRA on the MVTec AD dataset to perform automated, pixel-aware industrial surface defect detection under strict VRAM constraints.
+> **Quick Pitch**: Optimizing LLaVA-1.5-7B via QLoRA on the MVTec AD dataset to perform automated, pixel-aware industrial surface defect detection under strict free-tier GPU constraints.
 
----
-
-## 1. Architecture & Core Concept
-
-This project implements a multimodal instruction-tuning pipeline designed for automated quality control (KCS).
-
-### Application Architecture
-1. **Vision Encoding**: Input images are processed by the **CLIP Vision Encoder** (ViT-L/14) to extract dense spatial embeddings.
-2. **Cross-Modal Alignment**: A **Projection Layer** maps visual tokens into the LLM's text embedding space.
-3. **Reasoning & Generation**: The **Vicuna-7B LLM** acts as the cognitive engine to classify defects based on the aligned visual prompts.
-
-### Technical Rationale
-- **Why QLoRA?** Training a 7B-parameter model requires ~112GB of VRAM in pure FP32. By leveraging **4-bit NormalFloat (NF4)** quantization (via `bitsandbytes`), we compress the base LLM footprint to ~4GB, allowing the entire training pipeline to run on a single NVIDIA Tesla T4 (15GB VRAM) on Kaggle.
-- **Why LoRA?** Instead of full fine-tuning, Low-Rank Adaptation (LoRA) injects trainable rank decomposition matrices ($\Delta W = BA$) into the Transformer's self-attention layers. This freezes 99% of the LLM and reduces trainable parameters to less than 20M, preventing catastrophic forgetting while drastically accelerating training speeds.
+![Project Status](https://img.shields.io/badge/Status-Completed-success) ![Framework](https://img.shields.io/badge/Framework-HuggingFace-yellow) ![Model](https://img.shields.io/badge/Base_Model-LLaVA_1.5_7B-blue)
 
 ---
 
-## 2. Data Engineering: ETL Pipeline for MVTec AD
+## 1. Executive Summary & KPIs
 
-The original [MVTec AD Dataset](https://www.mvtec.com/company/research/datasets/mvtec-ad) is designed strictly for *unsupervised* generative anomaly detection. 
-To convert this into a supervised instruction-tuning format suitable for LLaVA, an ETL pipeline (`src/data_builder.py`) was engineered:
+This project implements a multimodal instruction-tuning pipeline designed for automated quality control (KCS). The core objective is transforming a conversational language model into a strict, coordinate-aware defect localizer capable of precise visual grounding on industrial surfaces.
 
-- **Extract**: Scans the highly imbalanced Kaggle dataset structure spanning 15 domains (textures and distinct objects).
-- **Transform**:
-  - **Color Space Unification**: 3 domains (Grid, Screw, Zipper) are natively grayscale. These cause tensor-shape mismatch crashes in the RGB-only CLIP ViT. The pipeline forcefully converts all 1-channel images to 3-channel RGB (`cv2.cvtColor`).
-  - **Native Sliding Window Zooming**: To solve the industrial tiny-object issue natively, 1024×1024 raw images are dynamically shredded into overlapping **336×336** magnified inference grids. This natively aligns fine-tuning topology with inference evaluation, exponentially expanding the model's small-defect vision matrix logic without aspect-ratio destruction.
-  - **Stratified Splitting**: Applies a strict 80/20 train/test split utilizing `StratifiedShuffleSplit`. This guarantees that the severe long-tail distribution of rare defects (e.g., *scratch*, *contamination*) is proportionally represented in both the training manifold and the evaluation set.
-- **Load**: Exports structured `train.jsonl` and `test.jsonl` files natively compatible with HuggingFace `datasets`.
+### Final Results versus Zero-Shot Baseline
+* **Recall (Defect Detection)**: **97.6%** (246/252 critical defects captured) - completely eliminating the 0.0% failure rate observed in the zero-shot baseline.
+* **Strict Localization (IoU > 0.5)**: Achieved 45 perfect bounding box localizations with a mean IoU soaring from 0.00 to **0.3554**.
+* **Basic F1-Score (Macro)**: **0.6007** - High sensitivity achieved, with precision structurally constrained by intentional hard negative mining sub-sampling during the data pipeline rendering phase.
 
-### Instruction-Tuning Format Example (JSONL)
+**Live tracking and loss convergence analytics are publicly available on Weights & Biases:**
+🚀 **[View W&B Analytics Dashboard](https://wandb.ai/dvydinh/vlm-industrial-finetuner)**
+
+---
+
+## 2. Architecture & Hardware Constraint Management
+
+Training a multimodal 7B-parameter architecture natively demands ~112GB of VRAM. This repository engineers a pipeline explicitly designed to conform to a **single NVIDIA Tesla T4 (15GB VRAM)**.
+
+### Technical Stack
+* **Representation**: CLIP Vision Encoder (ViT-L/14) cross-aligned to Vicuna-7B.
+* **Compression**: 4-bit NormalFloat (NF4) double quantization via `bitsandbytes`.
+* **Adaptation**: Low-Rank Adaptation (LoRA) specifically targeting the self-attention manifold (`q_proj`, `k_proj`, `v_proj`, `o_proj`) with an atypically high mathematical rank (`r=64`, `alpha=128`). This high-rank injection preserves the dense high-frequency topological data required to classify microscopic industrial defects.
+* **Optimizer**: `paged_adamw_8bit` integrated with mixed-precision `fp16` computing to mitigate VRAM out-of-memory spikes.
+
+---
+
+## 3. Data Engineering: ETL Pipeline for MVTec AD
+
+The MVTec AD Dataset is inherently designed for unsupervised discriminative learning. This pipeline (`src/data_builder.py`) structurally refactors it into a unified instruction-tuning schema.
+
+### Resolution & Spatial Tuning
+Industrial defects cannot be identified mathematically under aggressive 224x224 interpolation. To resolve this:
+1. **Sliding Window NMS Inference**: Original 1024×1024 topographies are dynamically tessellated into overlapping **336×336** inference macro-blocks.
+2. **Hard Negative Mining**: To prevent catastrophic Kaggle storage failure (30GB disk limit), non-defective background crops were heavily sub-sampled. While this safely averted storage exhaustion, the constrained negative sampling ratio directly accounts for the over-sensitivity (False Positive bias) observed during validation.
+3. **Stratified Splitting**: Strict `sklearn` splitting algorithmically anchors the long-tail rare defects proportionally across both the training and testing manifolds.
+
+### Instruction-Tuning Structure (JSONL)
 ```json
 {
   "id": "metal_nut_00124",
@@ -53,71 +64,25 @@ To convert this into a supervised instruction-tuning format suitable for LLaVA, 
 
 ---
 
-## 3. Training Configuration
+## 4. Evaluation Criteria
 
-| Hyperparameter | Value | Rationale |
-| :--- | :--- | :--- |
-| **Base Model** | `llava-hf/llava-1.5-7b-hf` | Baseline VLM pre-trained on generic concepts. |
-| **Quantization** | `4-bit (NF4)` | Double quantization enabled, `fp16` compute dtype. |
-| **LoRA Target Modules** | `q_proj`, `k_proj`, `v_proj`, `o_proj` | Targets all 4 self-attention projections for max capacity. |
-| **LoRA Rank ($r$)** | `64` | Native high-rank matrix to capture high-frequency complex industrial defect features natively without arithmetic smoothing. |
-| **LoRA Alpha ($\alpha$)** | `128` | Maintains the standard $\alpha/r = 2.0$ scaling factor. |
-| **Optimizer** | `paged_adamw_8bit` | Essential for preventing VRAM OOM spikes during backward passes. |
-| **Learning Rate** | `2e-5` | Cosine decay schedule with 3% warmup steps. |
-| **Hardware Constraint** | `1x NVIDIA Tesla T4` | Trained natively on Kaggle free-tier GPU. |
+The system circumvents inaccurate string-matching by deploying a mathematical Visual Grounding engine (`src/evaluate.py`). A response is classified as a True Positive exclusively if:
+1. The predicted defect terminology matches the ground truth.
+2. The exact coordinate boundaries intersect the ground-truth map with an **Intersection over Union (IoU) > 0.5**.
 
 ---
 
-## 4. Experiment Tracking & MLOps
+## 5. Reproducibility
 
-> **W&B Dashboard**: [Insert WandB Link Here]
-
-*(Insert screenshot of training and validation loss curves here after completion)*
-
----
-
-## 5. Results & Evaluation
-
-
-Evaluation is conducted by running inference homogeneously across the entire test set but strictly computing **Item-Wise F1-Score (Macro)** to explicitly measure the model's capability to generalize and recognize defects accurately per material.
-
-| Item Type | Zero-shot F1 | QLoRA F1 |
-| :--- | :--- | :--- |
-| Metal Nut | [Pending]% | [Pending]% |
-| Cable | [Pending]% | [Pending]% |
-| Leather | [Pending]% | [Pending]% |
-| Bottle | [Pending]% | [Pending]% |
-| Hazelnut | [Pending]% | [Pending]% |
-| Pill | [Pending]% | [Pending]% |
-| Transistor | [Pending]% | [Pending]% |
-| Zipper | [Pending]% | [Pending]% |
-| Carpet | [Pending]% | [Pending]% |
-| Grid | [Pending]% | [Pending]% |
-| Tile | [Pending]% | [Pending]% |
-| Wood | [Pending]% | [Pending]% |
-| Capsule | [Pending]% | [Pending]% |
-| Screw | [Pending]% | [Pending]% |
-| Toothbrush | [Pending]% | [Pending]% |
-| **Overall (Average)** | **[Pending]%** | **[Pending]%** |
-
-### Qualitative Results
-*(Insert Table of 3 validation samples here: Good vs Correct Defect vs Edge-case Defect)*
-
----
-
-## 6. Reproducibility
-
-**Kaggle Notebook**: [Insert Kaggle Link Here]
-
-To reproduce the zero-shot baseline or fine-tuned evaluation locally or on a cloud instance:
+The entire data preparation, baseline metric validation, iterative parameter tuning, and continuous cloud-based evaluation workflows are decoupled into three sequentially independent Python kernels.
 
 ```bash
-# 1. Clone repository
+# 1. Initialize workspace
 git clone https://github.com/dvydinh/vlm-industrial-finetuner.git && cd vlm-industrial-finetuner
-
-# 2. Install minimal dependencies
 pip install -r requirements.txt
 
-# 3. Run evaluation (assuming processed MVTec AD is in data/processed)
-python src/evaluate.py --baseline --test_data data/processed
+# 2. Execute execution units natively
+# -> notebooks/1_baseline_evaluation.ipynb (Baseline Inference Pipeline)
+# -> notebooks/2_qlora_training.ipynb (Distributed QLoRA Compilation)
+# -> notebooks/3_finetune_evaluation.ipynb (Cloud Model Recovery & Final Eval)
 ```
