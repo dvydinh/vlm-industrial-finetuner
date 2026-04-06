@@ -689,6 +689,14 @@ if __name__ == "__main__":
                         default="llava-hf/llava-1.5-7b-hf")
     args = parser.parse_args()
 
+    if HAS_WANDB:
+        run_name = "eval-baseline" if args.baseline else "eval-finetuned"
+        try:
+            wandb.init(project="vlm-industrial-finetuner", name=f"{run_name}-{datetime.now().strftime('%m%d_%H%M')}")
+            print(f"[WANDB] Initialized run: {wandb.run.name}")
+        except Exception as e:
+            print(f"[WANDB] Warning: Could not initialize WandB: {e}")
+
     if args.baseline:
         processor, model = load_base_model(args.base_model_id)
         run_evaluation(processor, model, args.test_data,
